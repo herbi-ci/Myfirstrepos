@@ -1,0 +1,453 @@
+<#
+MyVeeamReport.ps1
+Génère un rapport KPI Veeam avec graphiques intégrés (Style B) et option d'envoi par mail.
+Pré-requis : PowerShell ISE, Veeam PowerShell module installé sur la machine (VBR server).
+#>
+
+# 1) Dot-source variables (modifier le chemin si nécessaire)
+try {
+    $varFile = Join-Path $PSScriptRoot "MyVeeamReport_Variable.ps1"
+    if (Test-Path $varFile) {
+        . $varFile
+    } else {
+        Write-Host "Fichier variables non trouvé: $varFile. Utiliser valeurs par défaut embarquées." -ForegroundColor Yellow
+    }
+} catch {
+    Write-Warning "Impossible de charger le fichier de variables: $($_.Exception.Message)"
+}
+
+# 2) Charger module Veeam si disponible (ne pas modifier si ton environnement le gère)
+try {
+    if (Get-Module -ListAvailable -Name "Veeam.Backup.PowerShell") {
+        Import-Module Veeam.Backup.PowerShell -ErrorAction SilentlyContinue
+        Connect-VBRServer -Server "localhost" -ErrorAction SilentlyContinue | Out-Null
+    }
+} catch {
+    Write-Host "Module Veeam non disponible dans cette session. Le script utilisera les variables présentes si disponibles." -ForegroundColor Yellow
+}
+
+# 3) Fonctions de génération de charts (System.Windows.Forms.DataVisualization)
+Add-Type -AssemblyName System.Windows.Forms.DataVisualization -ErrorAction SilentlyContinue
+Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+
+function Convert-HexToColor {
+    param([string]$hex)
+    $h = $hex.TrimStart('#')
+    if ($h.Length -ne 6) { return [System.Drawing.Color]::Black }
+    $r = [Convert]::ToInt32($h.Substring(0,2),16)
+    $g = [Convert]::ToInt32($h.Substring(2,2),16)
+    $b = [Convert]::ToInt32($h.Substring(4,2),16)
+    return [System.Drawing.Color]::FromArgb($r,$g,$b)
+}
+
+function Save-DoughnutChartToBase64 {
+    param(
+        [double]$Percent,
+        [string]$Title,
+        [string]$Color = '#00B336',
+        [int]$Width = 600,
+        [int]$Height = 420
+    )
+    $tmp = [System.IO.Path]::Combine($env:TEMP, ('veeam_donut_{0}.png' -f ([Guid]::NewGuid().ToString())))
+    $chart = New-Object System.Windows.Forms.DataVisualization.Charting.Chart
+    $chart.Width = $Width; $chart.Height = $Height
+    $area = New-Object System.Windows.Forms.DataVisualization.Charting.ChartArea "ca"
+    $area.BackColor = "Transparent"
+    $chart.ChartAreas.Add($area)
+    $series = New-Object System.Windows.Forms.DataVisualization.Charting.Series "s"
+    $series.ChartType = [System.Windows.Forms.DataVisualization.Charting.SeriesChartType]::Doughnut
+    $series.Points.AddXY("Success",$Percent) | Out-Null
+    $series.Points.AddXY("Remaining",100 - $Percent) | Out-Null
+    $series["PieLabelStyle"] = "Disabled"
+    $chart.Series.Add($series)
+    $chart.Legends.Clear()
+    # Colors
+    try {
+        $chart.Series[0].Points[0].Color = Convert-HexToColor($Color)
+        $chart.Series[0].Points[1].Color = [System.Drawing.Color]::FromArgb(233,236,239)
+    } catch {}
+    $t = New-Object System.Windows.Forms.DataVisualization.Charting.Title
+    $t.Text = "$Title - $Percent`%"
+    $t.Font = New-Object System.Drawing.Font("Arial",12)
+    $chart.Titles.Add($t)
+    $chart.SaveImage($tmp, "Png")
+    $bytes = [System.IO.File]::ReadAllBytes($tmp)
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+    $chart.Dispose()
+    return [Convert]::ToBase64String($bytes)
+}
+
+function Save-BarChartToBase64 {
+    param(
+        [array]$Items, # array of @{Name,Value}
+        [string]$Title,
+        [string]$GoodColor = '#00B336',
+        [string]$BadColor  = '#E31E24',
+        [int]$Width = 1000,
+        [int]$Height = 400
+    )
+    $tmp = [System.IO.Path]::Combine($env:TEMP, ('veeam_bar_{0}.png' -f ([Guid]::NewGuid().ToString())))
+    $chart = New-Object System.Windows.Forms.DataVisualization.Charting.Chart
+    $chart.Width = $Width; $chart.Height = $Height
+    $area = New-Object System.Windows.Forms.DataVisualization.Charting.ChartArea "ca"
+    $area.AxisX.MajorGrid.Enabled = $false
+    $area.AxisY.MajorGrid.Enabled = $false
+    $area.AxisX.LabelStyle.Angle = 0
+    $area.AxisX.LabelStyle.Font = New-Object System.Drawing.Font("Arial",9)
+    $area.AxisY.LabelStyle.Font = New-Object System.Drawing.Font("Arial",9)
+    $area.AxisX.Interval = 1
+    $area.AxisY.Title = "Percent"
+    $chart.ChartAreas.Add($area)
+    $series = New-Object System.Windows.Forms.DataVisualization.Charting.Series "s"
+    $series.ChartType = [System.Windows.Forms.DataVisualization.Charting.SeriesChartType]::Bar
+    $series.IsValueShownAsLabel = $true
+    $chart.Series.Add($series)
+    foreach ($it in $Items) {
+        $val = 0
+        try { $val = [double]$it.Value } catch { $val = 0 }
+        $pt = $chart.Series[0].Points.AddXY($it.Name, $val)
+        $hex = if ($val -ge 80) { $BadColor } else { $GoodColor }
+        try {
+            $pt.Color = Convert-HexToColor($hex)
+        } catch {}
+    }
+    $chart.Legends.Clear()
+    $t = New-Object System.Windows.Forms.DataVisualization.Charting.Title
+    $t.Text = $Title
+    $t.Font = New-Object System.Drawing.Font("Arial",12)
+    $chart.Titles.Add($t)
+    $chart.SaveImage($tmp, "Png")
+    $bytes = [System.IO.File]::ReadAllBytes($tmp)
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+    $chart.Dispose()
+    return [Convert]::ToBase64String($bytes)
+}
+
+# 4) Récupération / fallback des KPI (utilise variables si définies par ton script principal)
+# Si ton script (séparé) a déjà défini ces variables, elles seront utilisées. Sinon on calcule fallback via les cmdlets Veeam.
+$sinceDays = if ($null -ne $JobsWindowDays) { $JobsWindowDays } else { 30 }
+$since = (Get-Date).AddDays(-1 * $sinceDays)
+
+# Helper: get variable if exists
+function Get-OrDefault([string]$name, $default) {
+    try {
+        return (Get-Variable -Name $name -Scope Script -ErrorAction SilentlyContinue).Value
+    } catch {
+        try { return (Get-Variable -Name $name -ErrorAction SilentlyContinue).Value } catch { return $default }
+    }
+}
+
+# Job success rates
+$backupSuccessRate = Get-OrDefault -name 'backupSuccessRate' -default $null
+$backupFailRate    = Get-OrDefault -name 'backupFailRate' -default $null
+$replicaSuccessRate = Get-OrDefault -name 'replicaSuccessRate' -default $null
+$replicaFailRate    = Get-OrDefault -name 'replicaFailRate' -default $null
+$tapeSuccessRate    = Get-OrDefault -name 'tapeSuccessRate' -default $null
+$tapeFailRate       = Get-OrDefault -name 'tapeFailRate' -default $null
+
+# If any of these are null and Veeam module is present, compute fallbacks
+if (($backupSuccessRate -eq $null -or $replicaSuccessRate -eq $null -or $tapeSuccessRate -eq $null) -and (Get-Module -Name Veeam.Backup.PowerShell -ErrorAction SilentlyContinue)) {
+    # Backup
+    try {
+        $bkJobs = Get-VBRJob | Where-Object { $_.JobType -eq 'Backup' -and $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true }
+        $bkSessions = @()
+        foreach ($j in $bkJobs) {
+            $s = Get-VBRJobSession -Job $j -Filter @{ CreationTime = @{ From = $since } } -ErrorAction SilentlyContinue
+            if ($s) { $bkSessions += $s }
+        }
+        $bkTotal = $bkSessions.Count
+        $bkSuccess = ($bkSessions | Where-Object { $_.Result -eq 'Success' }).Count
+        $bkFail = ($bkSessions | Where-Object { $_.Result -ne 'Success' }).Count
+        if ($bkTotal -gt 0) {
+            if ($backupSuccessRate -eq $null) { $backupSuccessRate = [math]::Round(($bkSuccess / $bkTotal) * 100,1) }
+            if ($backupFailRate -eq $null)    { $backupFailRate    = [math]::Round(($bkFail / $bkTotal) * 100,1) }
+        } else {
+            if ($backupSuccessRate -eq $null) { $backupSuccessRate = 0; $backupFailRate = 0 }
+        }
+    } catch {}
+    # Replica
+    try {
+        $rpJobs = Get-VBRJob | Where-Object { $_.JobType -eq 'Replica' -and $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true }
+        $rpSessions = @()
+        foreach ($j in $rpJobs) {
+            $s = Get-VBRJobSession -Job $j -Filter @{ CreationTime = @{ From = $since } } -ErrorAction SilentlyContinue
+            if ($s) { $rpSessions += $s }
+        }
+        $rpTotal = $rpSessions.Count
+        $rpSuccess = ($rpSessions | Where-Object { $_.Result -eq 'Success' }).Count
+        $rpFail = ($rpSessions | Where-Object { $_.Result -ne 'Success' }).Count
+        if ($rpTotal -gt 0) {
+            if ($replicaSuccessRate -eq $null) { $replicaSuccessRate = [math]::Round(($rpSuccess / $rpTotal) * 100,1) }
+            if ($replicaFailRate -eq $null)    { $replicaFailRate    = [math]::Round(($rpFail / $rpTotal) * 100,1) }
+        } else {
+            if ($replicaSuccessRate -eq $null) { $replicaSuccessRate = 0; $replicaFailRate = 0 }
+        }
+    } catch {}
+    # Tape
+    try {
+        $tpJobs = Get-VBRTapeJob | Where-Object { $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true }
+        $tpSessions = @()
+        foreach ($t in $tpJobs) {
+            $s = Get-VBRTapeJobSession -Job $t -Filter @{ CreationTime = @{ From = $since } } -ErrorAction SilentlyContinue
+            if ($s) { $tpSessions += $s }
+        }
+        $tpTotal = $tpSessions.Count
+        $tpSuccess = ($tpSessions | Where-Object { $_.Result -eq 'Success' }).Count
+        $tpFail = ($tpSessions | Where-Object { $_.Result -ne 'Success' }).Count
+        if ($tpTotal -gt 0) {
+            if ($tapeSuccessRate -eq $null) { $tapeSuccessRate = [math]::Round(($tpSuccess / $tpTotal) * 100,1) }
+            if ($tapeFailRate -eq $null)    { $tapeFailRate    = [math]::Round(($tpFail / $tpTotal) * 100,1) }
+        } else {
+            if ($tapeSuccessRate -eq $null) { $tapeSuccessRate = 0; $tapeFailRate = 0 }
+        }
+    } catch {}
+}
+
+# 5) Repositories and pools (fallback)
+$repoStats = Get-OrDefault -name 'repoStats' -default $null
+if ($repoStats -eq $null -and (Get-Module -Name Veeam.Backup.PowerShell -ErrorAction SilentlyContinue)) {
+    try {
+        $repoStats = Get-VBRBackupRepository | ForEach-Object {
+            $cap = 0; $free = 0
+            try { $cap = $_.Info.Capacity } catch { $cap = 0 }
+            try { $free = $_.Info.FreeSpace } catch { $free = 0 }
+            $usedPct = if ($cap -gt 0) { [math]::Round((($cap - $free) / $cap) * 100,1) } else { 0 }
+            [PSCustomObject]@{ Name = $_.Name; UsedPercent = $usedPct; Capacity_TB = [math]::Round($cap/1TB,2); Free_TB = [math]::Round($free/1TB,2) }
+        }
+    } catch { $repoStats = @() }
+}
+
+$tapePoolStats = Get-OrDefault -name 'tapePoolStats' -default $null
+if ($tapePoolStats -eq $null -and (Get-Module -Name Veeam.Backup.PowerShell -ErrorAction SilentlyContinue)) {
+    try {
+        $tapePoolStats = Get-VBRTapeMediaPool | ForEach-Object {
+            $medias = Get-VBRTapeMedium -MediaPool $_
+            $total = ($medias | Measure-Object).Count
+            $expired = ($medias | Where-Object { $_.IsExpired -eq $true }).Count
+            $usedPercent = if ($total -gt 0) { [math]::Round((($total - $expired)/$total) * 100,1) } else { 0 }
+            [PSCustomObject]@{ PoolName = $_.Name; UsedPercent = $usedPercent; TotalTapes = $total; Expired = $expired }
+        }
+    } catch { $tapePoolStats = @() }
+}
+
+# tapes expiring
+$tapesExpiring = Get-OrDefault -name 'tapesExpiring' -default $null
+if ($tapesExpiring -eq $null -and (Get-Module -Name Veeam.Backup.PowerShell -ErrorAction SilentlyContinue)) {
+    try {
+        $list = @()
+        foreach ($m in (Get-VBRTapeMedium)) {
+            $exp = $null
+            try { $exp = $m.ExpirationDate } catch { $exp = $null }
+            if (-not $exp -and $m.MediaSet) { try { $exp = $m.MediaSet.ProtectionPeriodEnd } catch { $exp = $null } }
+            if ($exp -and $exp -le (Get-Date).AddDays(7) -and $exp -ge (Get-Date)) {
+                $list += [PSCustomObject]@{ Barcode = $m.Barcode; ExpirationDate = $exp.ToString("yyyy-MM-dd"); MediaPool = ($m.MediaPool.Name -as [string]); IsWorm = ($m.IsWorm -as [bool]) }
+            }
+        }
+        $tapesExpiring = $list
+    } catch { $tapesExpiring = @() }
+}
+
+# inactive lists
+$inactiveJobsList = Get-OrDefault -name 'inactiveJobsList' -default $null
+if ($inactiveJobsList -eq $null -and (Get-Module -Name Veeam.Backup.PowerShell -ErrorAction SilentlyContinue)) {
+    try {
+        $threeMonthsAgo = (Get-Date).AddMonths(-3)
+        $list = @()
+        foreach ($j in (Get-VBRJob)) {
+            $last = Get-VBRJobSession -Job $j -MaxCount 1 -ErrorAction SilentlyContinue
+            $lastRun = if ($last) { $last.CreationTime } else { $null }
+            if ($j.IsScheduleEnabled -eq $false -or (-not $lastRun) -or ($lastRun -lt $threeMonthsAgo)) {
+                $list += [PSCustomObject]@{ Name = $j.Name; IsScheduled = $j.IsScheduleEnabled; LastRun = if ($lastRun) { $lastRun.ToString("yyyy-MM-dd") } else { "Never" } }
+            }
+        }
+        $inactiveJobsList = $list
+    } catch { $inactiveJobsList = @() }
+}
+
+$inactiveReposList = Get-OrDefault -name 'inactiveReposList' -default $null
+if ($inactiveReposList -eq $null -and (Get-Module -Name Veeam.Backup.PowerShell -ErrorAction SilentlyContinue)) {
+    try {
+        $threeMonthsAgo = (Get-Date).AddMonths(-3)
+        $list = @()
+        foreach ($r in (Get-VBRBackupRepository)) {
+            $la = $null
+            try { $la = $r.LastAccess } catch { $la = $null }
+            if (($la -and $la -lt $threeMonthsAgo) -or ($r.Info.FreeSpace -ge $r.Info.Capacity)) {
+                $list += [PSCustomObject]@{ Name = $r.Name; LastAccess = if ($la) { $la.ToString("yyyy-MM-dd") } else { "N/A" }; FreeGB = [math]::Round($r.Info.FreeSpace/1GB,2) }
+            }
+        }
+        $inactiveReposList = $list
+    } catch { $inactiveReposList = @() }
+}
+
+$inactiveProxiesList = Get-OrDefault -name 'inactiveProxiesList' -default $null
+if ($inactiveProxiesList -eq $null -and (Get-Module -Name Veeam.Backup.PowerShell -ErrorAction SilentlyContinue)) {
+    try {
+        $list = @()
+        foreach ($p in (Get-VBRViProxy)) {
+            $enabled = $null; $state = $null
+            try { $enabled = $p.IsEnabled } catch { $enabled = $null }
+            try { $state = $p.State } catch { $state = $null }
+            if (($enabled -eq $false) -or ($state -and $state -ne "Online")) {
+                $list += [PSCustomObject]@{ Name = $p.Name; Enabled = $enabled; State = $state }
+            }
+        }
+        $inactiveProxiesList = $list
+    } catch { $inactiveProxiesList = @() }
+}
+
+# 6) Generate charts and inline HTML (Style B)
+$img_backup = Save-DoughnutChartToBase64 -Percent $backupSuccessRate -Title "Backup Success" -Color "#00B336"
+$img_replica = Save-DoughnutChartToBase64 -Percent $replicaSuccessRate -Title "Replica Success" -Color "#00B336"
+$img_tape    = Save-DoughnutChartToBase64 -Percent $tapeSuccessRate -Title "Tape Success" -Color "#00B336"
+
+$repoItems = @()
+foreach ($r in $repoStats) { $repoItems += [PSCustomObject]@{ Name = $r.Name; Value = ([double]($r.UsedPercent)) } }
+if ($repoItems.Count -eq 0) { $repoItems += [PSCustomObject]@{ Name = "No repositories"; Value = 0 } }
+$img_repos = Save-BarChartToBase64 -Items $repoItems -Title "Repositories Usage" -GoodColor "#00B336" -BadColor "#E31E24"
+
+$poolItems = @()
+foreach ($p in $tapePoolStats) { $poolItems += [PSCustomObject]@{ Name = $p.PoolName; Value = ([double]($p.UsedPercent)) } }
+if ($poolItems.Count -eq 0) { $poolItems += [PSCustomObject]@{ Name = "No tape pools"; Value = 0 } }
+$img_pools = Save-BarChartToBase64 -Items $poolItems -Title "Tape Pools Usage" -GoodColor "#00B336" -BadColor "#E31E24"
+
+# Build tables
+$repoTableHtml = ""
+if ($repoStats.Count -gt 0) {
+    $repoTableHtml = "<table style='width:100%;border-collapse:collapse'><tr><th style='text-align:left;padding:6px;border:1px solid #eee'>Repository</th><th style='padding:6px;border:1px solid #eee;text-align:right'>Cap (TB)</th><th style='padding:6px;border:1px solid #eee;text-align:right'>Free (TB)</th><th style='padding:6px;border:1px solid #eee;text-align:right'>Used (%)</th></tr>"
+    foreach ($r in $repoStats) {
+        $repoTableHtml += "<tr><td style='padding:6px;border:1px solid #eee'>$($r.Name)</td><td style='padding:6px;border:1px solid #eee;text-align:right'>$($r.Capacity_TB)</td><td style='padding:6px;border:1px solid #eee;text-align:right'>$($r.Free_TB)</td><td style='padding:6px;border:1px solid #eee;text-align:right'>$($r.UsedPercent)</td></tr>"
+    }
+    $repoTableHtml += "</table>"
+} else {
+    $repoTableHtml = "<div style='padding:8px'>Aucun repository détecté</div>"
+}
+
+$tapesExpHtml = ""
+if ($tapesExpiring.Count -gt 0) {
+    $tapesExpHtml = "<table style='width:100%;border-collapse:collapse'><tr><th style='text-align:left;padding:6px;border:1px solid #eee'>Barcode</th><th style='padding:6px;border:1px solid #eee'>Expiration</th><th style='padding:6px;border:1px solid #eee'>Pool</th><th style='padding:6px;border:1px solid #eee'>WORM</th></tr>"
+    foreach ($t in $tapesExpiring) {
+        $tapesExpHtml += "<tr><td style='padding:6px;border:1px solid #eee'>$($t.Barcode)</td><td style='padding:6px;border:1px solid #eee'>$($t.ExpirationDate)</td><td style='padding:6px;border:1px solid #eee'>$($t.MediaPool)</td><td style='padding:6px;border:1px solid #eee'>$($t.IsWorm)</td></tr>"
+    }
+    $tapesExpHtml += "</table>"
+} else {
+    $tapesExpHtml = "<div style='padding:8px'>Aucune bande n'expire dans les 7 prochains jours.</div>"
+}
+
+$inactiveHtml = "<div style='display:flex;gap:12px;flex-wrap:wrap'>"
+$inactiveHtml += "<div style='padding:12px;border:1px solid #ddd;background:#fff;border-radius:6px;min-width:160px'><b>Jobs inactifs</b><br/>$($inactiveJobsList.Count)</div>"
+$inactiveHtml += "<div style='padding:12px;border:1px solid #ddd;background:#fff;border-radius:6px;min-width:160px'><b>Repos inactifs</b><br/>$($inactiveReposList.Count)</div>"
+$inactiveHtml += "<div style='padding:12px;border:1px solid #ddd;background:#fff;border-radius:6px;min-width:160px'><b>Proxies inactifs</b><br/>$($inactiveProxiesList.Count)</div>"
+$inactiveHtml += "</div>"
+
+# Compose HTML (style B)
+$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$html = @"
+<!doctype html>
+<html>
+<head>
+<meta charset='utf-8'>
+<title>Veeam KPI Dashboard</title>
+<style>
+body { font-family: Arial, Helvetica, sans-serif; background:#f0f2f5; color:#222; padding:18px; }
+.header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+.card { background:#fff; padding:14px; border-radius:8px; box-shadow:0 1px 6px rgba(0,0,0,0.06); margin-bottom:12px; }
+.kpi-row { display:flex; gap:12px; flex-wrap:wrap; }
+.kpi-card { width:300px; }
+.title { color:#0b3a2f; font-weight:700; margin-bottom:6px; }
+.small { color:#666; font-size:13px; }
+.table { width:100%; border-collapse:collapse; margin-top:8px; }
+.table th, .table td { border:1px solid #eee; padding:6px; }
+</style>
+</head>
+<body>
+  <div class='header'>
+    <div>
+      <h1 style='margin:0'>Veeam KPI Dashboard</h1>
+      <div class='small'>Généré: $timestamp</div>
+    </div>
+    <div class='small'>Serveur: $(hostname)</div>
+  </div>
+
+  <div class='kpi-row'>
+    <div class='card kpi-card'>
+      <div class='title'>Sauvegardes disque (30j)</div>
+      <img src='data:image/png;base64,$img_backup' style='width:100%;height:auto' alt='backup'/>
+      <div class='small' style='margin-top:8px'>Succès: <b style='color:#00B336'>$backupSuccessRate`%</b> — Échecs: <b style='color:#E31E24'>$backupFailRate`%</b></div>
+    </div>
+
+    <div class='card kpi-card'>
+      <div class='title'>Réplication (30j)</div>
+      <img src='data:image/png;base64,$img_replica' style='width:100%;height:auto' alt='replica'/>
+      <div class='small' style='margin-top:8px'>Succès: <b style='color:#00B336'>$replicaSuccessRate`%</b> — Échecs: <b style='color:#E31E24'>$replicaFailRate`%</b></div>
+    </div>
+
+    <div class='card kpi-card'>
+      <div class='title'>Tape (30j)</div>
+      <img src='data:image/png;base64,$img_tape' style='width:100%;height:auto' alt='tape'/>
+      <div class='small' style='margin-top:8px'>Succès: <b style='color:#00B336'>$tapeSuccessRate`%</b> — Échecs: <b style='color:#E31E24'>$tapeFailRate`%</b></div>
+    </div>
+
+    <div class='card' style='flex:1'>
+      <div class='title'>Utilisation des repositories</div>
+      <img src='data:image/png;base64,$img_repos' style='width:100%;height:auto' alt='repos'/>
+      <div style='margin-top:8px'>$repoTableHtml</div>
+    </div>
+  </div>
+
+  <div class='card'>
+    <div class='title'>Utilisation des Tape Pools</div>
+    <img src='data:image/png;base64,$img_pools' style='width:100%;height:auto' alt='pools'/>
+    <div style='margin-top:8px'>
+      $($tapePoolStats | ForEach-Object { "<span style='display:inline-block;margin-right:8px;padding:6px;border-radius:6px;background:#fff;border:1px solid #eee'>$($_.PoolName) : $($_.UsedPercent)%</span>" } -join "")
+    </div>
+  </div>
+
+  <div class='card'>
+    <div class='title'>Bandes expirant dans 7 jours</div>
+    <div style='margin-top:8px'>$tapesExpHtml</div>
+  </div>
+
+  <div class='card'>
+    <div class='title'>Composants inactifs (>3 mois)</div>
+    $inactiveHtml
+  </div>
+
+  <div class='card small'>
+    Note: Données calculées sur les $sinceDays derniers jours pour les jobs. Charts générés via System.Windows.Forms.DataVisualization.Charting.
+  </div>
+</body>
+</html>
+"@
+
+# 7) Write report file
+$dir = Split-Path -Path $ReportPath -Parent
+if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+Set-Content -Path $ReportPath -Value $html -Encoding UTF8
+Write-Host "Rapport avec charts généré : $ReportPath" -ForegroundColor Green
+
+# 8) Email sending (bloc clair et facilement activable/désactivable)
+# Pour activer: éditer MyVeeamReport_Variable.ps1 et mettre $SendInBody/$SendAsAttachment à $true et renseigner SMTP
+if ($SendInBody -or $SendAsAttachment) {
+    try {
+        $bodyHtml = Get-Content -Path $ReportPath -Raw
+        $mailParams = @{
+            SmtpServer = $SMTPServer
+            Port       = $SMTPPort
+            From       = $MailFrom
+            To         = $MailTo
+            Subject    = $MailSubject
+            Body       = $bodyHtml
+            BodyAsHtml = $true
+        }
+        if ($SendAsAttachment) { $mailParams.Add("Attachments",$ReportPath) }
+        Send-MailMessage @mailParams
+        Write-Host "Email envoyé à $MailTo" -ForegroundColor Green
+    } catch {
+        Write-Warning "Envoi mail échoué: $($_.Exception.Message)"
+    }
+} else {
+    Write-Host "Envoi mail désactivé. Activez `$SendInBody ou `$SendAsAttachment dans MyVeeamReport_Variable.ps1 pour envoyer le rapport." -ForegroundColor Yellow
+}
+
+# FIN du script
