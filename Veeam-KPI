@@ -1,506 +1,134 @@
-<#
-Veeam KPI Dashboard - PowerShell
-Compatible Veeam Backup & Replication 12.3.1.1139
-Exécuter manuellement dans PowerShell ISE en tant qu'Administrateur
-Remarque: modifier manuellement les paramètres SMTP et $ReportPath en haut du script
-#>
+# =====================================================================
+# VEEAM KPI DASHBOARD REPORT - PowerShell ISE Edition
+# Version compatible : Veeam Backup & Replication 12.3.1.1139
+# Auteur : ChatGPT (adapté pour exécution manuelle)
+# =====================================================================
 
-# -----------------------------
-# CONFIG (à modifier manuellement)
-# -----------------------------
-$ReportPath = "C:\Reports\Veeam_Dashboard.html"   # Chemin du rapport HTML (modifier)
-$ReportTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+# --- Chargement du module Veeam ---
+try {
+    if (-not (Get-Module -ListAvailable -Name Veeam.Backup.PowerShell)) {
+        Write-Host " Module Veeam.Backup.PowerShell introuvable. Installe-le avant de continuer." -ForegroundColor Red
+        break
+    }
+    Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
+    Connect-VBRServer -Server localhost | Out-Null
+    Write-Host " Connecté à Veeam Backup Server"
+} catch {
+    Write-Host "Erreur lors de la connexion à Veeam : $($_.Exception.Message)" -ForegroundColor Red
+    break
+}
 
-# SMTP settings (laisser vide/par défaut — modifier avant activation de l'envoi)
-$SMTPServer = "smtp.yourdomain.local"
-$SMTPPort   = 25
-$MailFrom   = "veeam-report@yourdomain.local"
-$MailTo     = "admin@yourdomain.local"
-$MailSubject = "Veeam KPI Dashboard - $ReportTimestamp"
+# --- Récupération des Jobs actifs ---
+$backupJobs = Get-VBRJob | Where-Object { $_.JobType -eq "Backup" -and $_.IsScheduleEnabled -eq $true }
+$tapeJobs   = Get-VBRTapeJob | Where-Object { $_.IsScheduleEnabled -eq $true }
+$replicaJobs = Get-VBRJob | Where-Object { $_.JobType -eq "Replica" -and $_.IsScheduleEnabled -eq $true }
 
-# Toggle envoi email (modifier manuellement)
-$SendInBody      = $false   # true = envoie le HTML dans le corps du mail
-$SendAsAttachment= $false   # true = attache le fichier HTML
-# -----------------------------
+# --- Fonction pour calculer le taux de réussite des jobs ---
+function Get-JobSuccessRate($jobs) {
+    $total = $jobs.Count
+    if ($total -eq 0) { return @{Success = 0; Failed = 0} }
 
-# -----------------------------
-# Helper: Safe invocation wrapper
-# -----------------------------
-function Safe(& $ScriptBlock) {
-    try {
-        & $ScriptBlock
-    } catch {
-        Write-Verbose "Ignored error: $($_.Exception.Message)"
-        return $null
+    $sessions = $jobs | ForEach-Object { Get-VBRJobSession -Job $_ | Sort-Object EndTime -Descending | Select-Object -First 1 }
+    $success = ($sessions | Where-Object { $_.Result -eq "Success" }).Count
+    $failed  = ($sessions | Where-Object { $_.Result -ne "Success" }).Count
+    return @{
+        Success = [math]::Round(($success / $total) * 100, 0)
+        Failed  = [math]::Round(($failed / $total) * 100, 0)
     }
 }
 
-# -----------------------------
-# Charger module Veeam (ISE friendly)
-# -----------------------------
-$veeamLoaded = $false
-if (Get-Module -ListAvailable -Name "Veeam.Backup.PowerShell") {
-    try {
-        Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
-        $veeamLoaded = $true
-    } catch {
-        Write-Warning "Impossible d'importer le module Veeam.Backup.PowerShell: $($_.Exception.Message)"
-    }
-} else {
-    # Try snap-in for older setups
-    try {
-        Add-PSSnapin -Name VeeamPSSnapIn -ErrorAction Stop
-        $veeamLoaded = $true
-    } catch {
-        Write-Warning "Veeam PowerShell module/snapin introuvable sur ce serveur."
+$backupStats = Get-JobSuccessRate $backupJobs
+$tapeStats   = Get-JobSuccessRate $tapeJobs
+$replicaStats = Get-JobSuccessRate $replicaJobs
+
+# --- Repositories ---
+$repositories = Get-VBRBackupRepository | ForEach-Object {
+    $free = $_.Info.FreeSpace
+    $cap  = $_.Info.Capacity
+    [PSCustomObject]@{
+        Name = $_.Name
+        UsedPercent = [math]::Round((($cap - $free) / $cap) * 100, 1)
+        FreeTB = [math]::Round($free / 1TB, 2)
+        CapacityTB = [math]::Round($cap / 1TB, 2)
     }
 }
 
-if (-not $veeamLoaded) {
-    Write-Error "Module Veeam non disponible. Installez / exécutez ce script sur le serveur Veeam."
-    return
-}
-
-# Connect to local VBR server
-Safe { Connect-VBRServer -Server "localhost" } | Out-Null
-
-# -----------------------------
-# Fonctions utilitaires SVG donuts
-# -----------------------------
-function Get-DonutSVG ($percent, $label, $size=130, $thickness=18, $color="#00B336", $bg="#e9ecef") {
-    # percent: 0-100
-    $r = ($size/2) - ($thickness/2)
-    $circ = 2 * [math]::PI * $r
-    $offset = $circ * (1 - ($percent/100))
-    $labelEsc = [System.Web.HttpUtility]::HtmlEncode($label)
-@"<svg width='$size' height='$size' viewBox='0 0 $size $size' xmlns='http://www.w3.org/2000/svg'>
-  <g transform='rotate(-90 $($size/2) $($size/2))'>
-    <circle cx='$($size/2)' cy='$($size/2)' r='$r' stroke='$bg' stroke-width='$thickness' fill='none' />
-    <circle cx='$($size/2)' cy='$($size/2)' r='$r' stroke='$color' stroke-width='$thickness' stroke-dasharray='$circ' stroke-dashoffset='$offset' stroke-linecap='round' fill='none' />
-  </g>
-  <text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' font-family='Arial' font-size='14' fill='#222'>$labelEsc</text>
-</svg>"@
-}
-
-# -----------------------------
-# KPI: Jobs success/fail rates (30 jours)
-# Filtre: jobs actifs et planifiés (IsActive -eq $true and IsScheduleEnabled -eq $true)
-# -----------------------------
-$since = (Get-Date).AddDays(-30)
-
-# Backup jobs
-$backupJobs = Safe { Get-VBRJob | Where-Object { $_.JobType -eq 'Backup' -and $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true } }
-$backupSessions = @()
-if ($backupJobs) {
-    foreach ($j in $backupJobs) {
-        $s = Safe { Get-VBRJobSession -Job $j -Filter @{ CreationTime = @{From=$since}} }  # Get sessions since date
-        if ($s) { $backupSessions += $s }
-    }
-}
-$backupTotal = $backupSessions.Count
-$backupSuccess = ($backupSessions | Where-Object {$_.Result -eq 'Success'}).Count
-$backupFail    = ($backupSessions | Where-Object {$_.Result -ne 'Success'}).Count
-if ($backupTotal -gt 0) {
-    $backupSuccessRate = [math]::Round(($backupSuccess/$backupTotal)*100,1)
-    $backupFailRate    = [math]::Round(($backupFail/$backupTotal)*100,1)
-} else {
-    $backupSuccessRate = 0; $backupFailRate = 0
-}
-
-# Replica jobs
-$replicaJobs = Safe { Get-VBRJob | Where-Object { $_.JobType -eq 'Replica' -and $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true } }
-$replicaSessions = @()
-if ($replicaJobs) {
-    foreach ($j in $replicaJobs) {
-        $s = Safe { Get-VBRJobSession -Job $j -Filter @{ CreationTime = @{From=$since}} }
-        if ($s) { $replicaSessions += $s }
-    }
-}
-$replicaTotal = $replicaSessions.Count
-$replicaSuccess = ($replicaSessions | Where-Object {$_.Result -eq 'Success'}).Count
-$replicaFail    = ($replicaSessions | Where-Object {$_.Result -ne 'Success'}).Count
-if ($replicaTotal -gt 0) {
-    $replicaSuccessRate = [math]::Round(($replicaSuccess/$replicaTotal)*100,1)
-    $replicaFailRate    = [math]::Round(($replicaFail/$replicaTotal)*100,1)
-} else {
-    $replicaSuccessRate = 0; $replicaFailRate = 0
-}
-
-# Tape jobs (active & scheduled)
-$tapeJobs = Safe { Get-VBRTapeJob | Where-Object { $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true } }
-$tapeSessions = @()
-if ($tapeJobs) {
-    foreach ($t in $tapeJobs) {
-        $s = Safe { Get-VBRTapeJobSession -Job $t -Filter @{ CreationTime = @{From=$since}} }
-        if ($s) { $tapeSessions += $s }
-    }
-}
-$tapeTotal = $tapeSessions.Count
-$tapeSuccess = ($tapeSessions | Where-Object {$_.Result -eq 'Success'}).Count
-$tapeFail    = ($tapeSessions | Where-Object {$_.Result -ne 'Success'}).Count
-if ($tapeTotal -gt 0) {
-    $tapeSuccessRate = [math]::Round(($tapeSuccess/$tapeTotal)*100,1)
-    $tapeFailRate    = [math]::Round(($tapeFail/$tapeTotal)*100,1)
-} else {
-    $tapeSuccessRate = 0; $tapeFailRate = 0
-}
-
-# -----------------------------
-# KPI: Storage repositories usage
-# -----------------------------
-$repoStats = @()
-$repos = Safe { Get-VBRBackupRepository }
-if ($repos) {
-    foreach ($r in $repos) {
-        # capacity / freespace properties exist in v12
-        $cap = 0; $free = 0; $usedPct = "N/A"
-        try { $cap = [math]::Round(($r.Capacity / 1TB),2) } catch { $cap = 0 }
-        try { $free = [math]::Round(($r.FreeSpace / 1TB),2) } catch { $free = 0 }
-        if ($cap -gt 0) { $usedPct = [math]::Round((($cap - $free)/$cap)*100,1) }
-        $repoStats += [PSCustomObject]@{
-            Name = $r.Name
-            Capacity_TB = $cap
-            Free_TB = $free
-            UsedPercent = $usedPct
-        }
+# --- Tape Pools ---
+$tapePools = Get-VBRTapeMediaPool | ForEach-Object {
+    $tapes = Get-VBRTapeMedium -MediaPool $_
+    $used = ($tapes | Where-Object { $_.MediaPoolId -ne $null }).Count
+    $total = $tapes.Count
+    [PSCustomObject]@{
+        Name = $_.Name
+        UsedPercent = if ($total -gt 0) { [math]::Round(($used / $total) * 100, 1) } else { 0 }
+        TotalTapes = $total
     }
 }
 
-# -----------------------------
-# KPI: Tape Pools usage
-# -----------------------------
-$tapePoolStats = @()
-$tapePools = Safe { Get-VBRTapeMediaPool }
-if ($tapePools) {
-    foreach ($p in $tapePools) {
-        $medias = Safe { Get-VBRTapeMedium -MediaPool $p } 
-        $total = ($medias | Measure-Object).Count
-        $expired = ($medias | Where-Object { $_.IsExpired -eq $true } | Measure-Object).Count
-        $protected = ($medias | Where-Object { $_.IsProtected -eq $true } | Measure-Object).Count
-        # UsedPercent for pool = proportion of used slots (we choose used = protected or non-free)
-        $used = if ($total -gt 0) { [math]::Round((($total - $expired)/$total)*100,1) } else { 0 }
-        $tapePoolStats += [PSCustomObject]@{
-            PoolName = $p.Name
-            TotalTapes = $total
-            Expired = $expired
-            Protected = $protected
-            UsedPercent = $used
-        }
-    }
-}
-
-# -----------------------------
-# KPI: Tapes expiring in next 7 days
-# -----------------------------
-$tapesExpiring = @()
-$allTapes = Safe { Get-VBRTapeMedium }
-if ($allTapes) {
-    foreach ($m in $allTapes) {
-        # try ExpirationDate property
-        $exp = $null
-        try { $exp = $m.ExpirationDate } catch { $exp = $null }
-        if (-not $exp -and $m.MediaSet) {
-            try { $exp = $m.MediaSet.ProtectionPeriodEnd } catch { $exp = $null }
-        }
-        if ($exp -and $exp -le (Get-Date).AddDays(7) -and $exp -ge (Get-Date)) {
-            $tapesExpiring += [PSCustomObject]@{
-                Barcode = $m.Barcode
-                ExpirationDate = $exp.ToString("yyyy-MM-dd")
-                MediaPool = ($m.MediaPool.Name -as [string])
-                IsWorm = ($m.IsWorm -as [bool])
-            }
-        }
-    }
-}
-
-# -----------------------------
-# CONFIG checks (inactive > 3 months)
-# -----------------------------
-$threeMonthsAgo = (Get-Date).AddMonths(-3)
-
-# Jobs inactive or not scheduled / not run >3 months
-$inactiveJobsList = @()
-$allJobs = Safe { Get-VBRJob }
-if ($allJobs) {
-    foreach ($j in $allJobs) {
-        $isScheduled = $j.IsScheduleEnabled
-        $isActive = $j.IsActive
-        # get last session time
-        $lastSession = Safe { Get-VBRJobSession -Job $j -MaxCount 1 }
-        $lastRunTime = $null
-        if ($lastSession) { $lastRunTime = $lastSession.CreationTime } else { $lastRunTime = $null }
-        if (($isScheduled -eq $false) -or ($lastRunTime -and $lastRunTime -lt $threeMonthsAgo) -or (-not $lastRunTime)) {
-            # mark as inactive for report if meets criteria
-            $inactiveJobsList += [PSCustomObject]@{
-                Name = $j.Name
-                IsScheduled = $isScheduled
-                LastRun = if ($lastRunTime) { $lastRunTime.ToString("yyyy-MM-dd") } else { "Never" }
-            }
-        }
-    }
-}
-
-# Repos inactive: last access older than 3 months OR not used (free = capacity)
-$inactiveReposList = @()
-if ($repos) {
-    foreach ($r in $repos) {
-        $lastAccess = $null
-        try { $lastAccess = $r.LastAccess } catch { $lastAccess = $null }
-        if (($lastAccess -and $lastAccess -lt $threeMonthsAgo) -or ($r.FreeSpace -ge $r.Capacity)) {
-            $inactiveReposList += [PSCustomObject]@{
-                Name = $r.Name
-                LastAccess = if ($lastAccess) { $lastAccess.ToString("yyyy-MM-dd") } else { "N/A" }
-                FreeGB = [math]::Round($r.FreeSpace/1GB,2)
-            }
-        }
-    }
-}
-
-# Proxies inactive: disabled or state not online
-$inactiveProxiesList = @()
-$proxies = Safe { Get-VBRViProxy }
-if ($proxies) {
-    foreach ($p in $proxies) {
-        # check enabled and state
-        $enabled = $null; $state = $null
-        try { $enabled = $p.IsEnabled } catch { $enabled = $null }
-        try { $state = $p.State } catch { $state = $null }
-        if (($enabled -eq $false) -or ($state -and $state -ne "Online")) {
-            $inactiveProxiesList += [PSCustomObject]@{
-                Name = $p.Name
-                Enabled = $enabled
-                State = if ($state) { $state } else { "Unknown" }
-            }
-        }
-    }
-}
-
-# -----------------------------
-# Build HTML report
-# -----------------------------
-$veeamGreen = "#00B336"
-$veeamRed   = "#E31E24"
-
-# Inline style
-$style = @"
-<style>
-body { font-family: Arial, Helvetica, sans-serif; background:#ffffff; color:#222; margin:20px; }
-.header { display:flex; justify-content:space-between; align-items:center; }
-.h1 { font-size:22px; color:#0b3a2f; }
-.kpi-row { display:flex; gap:18px; margin-top:18px; flex-wrap:wrap; }
-.card { width:280px; padding:12px; box-shadow:0 1px 5px rgba(0,0,0,0.08); border-radius:8px; background:#fff; }
-.card .title { font-weight:700; color:#333; margin-bottom:8px; }
-.small { font-size:12px; color:#666; }
-.table { width:100%; border-collapse: collapse; margin-top:12px; }
-.table th, .table td { border:1px solid #e6e6e6; padding:6px; text-align:left; font-size:13px; }
-.badge-red { color:$veeamRed; font-weight:700; }
-.badge-green { color:$veeamGreen; font-weight:700; }
-.section { margin-top:22px; }
-.footer { margin-top:18px; font-size:12px; color:#666; }
-</style>
+# --- HTML Color Functions ---
+function Get-GaugeHTML($title, $value, $color) {
+    return @"
+    <div style='display:inline-block; text-align:center; margin:20px;'>
+        <svg width='120' height='120' viewBox='0 0 36 36'>
+            <path d='M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831'
+            fill='none' stroke='#eee' stroke-width='2'/>
+            <path d='M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831'
+            fill='none' stroke='$color' stroke-width='2' stroke-dasharray='$value,100' />
+            <text x='18' y='20.35' font-size='8' text-anchor='middle' fill='$color'>$value%</text>
+        </svg>
+        <div style='font-weight:bold; color:$color;'>$title</div>
+    </div>
 "@
-
-# KPI cards HTML (donuts)
-$backupSVG = Get-DonutSVG -percent $backupSuccessRate -label ("$backupSuccessRate`%") -color $veeamGreen
-$replicaSVG = Get-DonutSVG -percent $replicaSuccessRate -label ("$replicaSuccessRate`%") -color (if ($replicaSuccessRate -ge 80) { $veeamGreen } else { $veeamRed })
-$tapeSVG = Get-DonutSVG -percent $tapeSuccessRate -label ("$tapeSuccessRate`%") -color $veeamGreen
-
-# Storage donut - overall average used percent across repos (if any)
-$overallUsed = 0
-if ($repoStats.Count -gt 0) {
-    $vals = $repoStats | Where-Object { $_.UsedPercent -ne "N/A" } | Select-Object -ExpandProperty UsedPercent
-    if ($vals) { $overallUsed = [math]::Round(($vals | Measure-Object -Average).Average,1) }
 }
-$storageSVG = Get-DonutSVG -percent $overallUsed -label ("$overallUsed`%") -color $veeamGreen
 
-# Build HTML body
+# --- Génération du rapport HTML ---
 $html = @"
-<!doctype html>
-<html>
-<head><meta charset='utf-8'><title>Veeam KPI Dashboard</title>$style</head>
-<body>
-  <div class='header'>
-    <div class='h1'>Veeam KPI Dashboard</div>
-    <div class='small'>Généré le: $ReportTimestamp</div>
-  </div>
-
-  <div class='kpi-row'>
-    <div class='card'>
-      <div class='title'>Consommation de stockage (moyenne)</div>
-      <div style='display:flex;align-items:center;gap:10px'>
-        <div>$storageSVG</div>
-        <div>
-          <div style='font-size:18px;font-weight:700'>$overallUsed`%</div>
-          <div class='small'>Utilisation moyenne des repositories</div>
-        </div>
-      </div>
-    </div>
-
-    <div class='card'>
-      <div class='title'>Sauvegardes sur disque (30j)</div>
-      <div style='display:flex;align-items:center;gap:10px'>
-        <div>$backupSVG</div>
-        <div>
-          <div style='font-size:18px;font-weight:700'>$backupSuccessRate`% <span class='small' style='color:#666'>succès</span></div>
-          <div class='small'>Sessions analysées: $backupTotal</div>
-        </div>
-      </div>
-    </div>
-
-    <div class='card'>
-      <div class='title'>Réplication (30j)</div>
-      <div style='display:flex;align-items:center;gap:10px'>
-        <div>$replicaSVG</div>
-        <div>
-          <div style='font-size:18px;font-weight:700'>$replicaSuccessRate`% <span class='small' style='color:#666'>succès</span></div>
-          <div class='small'>Sessions analysées: $replicaTotal</div>
-        </div>
-      </div>
-    </div>
-
-    <div class='card'>
-      <div class='title'>Archivage (Tape) (30j)</div>
-      <div style='display:flex;align-items:center;gap:10px'>
-        <div>$tapeSVG</div>
-        <div>
-          <div style='font-size:18px;font-weight:700'>$tapeSuccessRate`% <span class='small' style='color:#666'>succès</span></div>
-          <div class='small'>Sessions analysées: $tapeTotal</div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class='section'>
-    <h3>Utilisation des repositories</h3>
-    <table class='table'>
-      <tr><th>Repository</th><th>Capacité (TB)</th><th>Libre (TB)</th><th>Utilisation (%)</th></tr>
-"@
-
-if ($repoStats.Count -gt 0) {
-    foreach ($r in $repoStats) {
-        $colClass = if ($r.UsedPercent -ne "N/A" -and $r.UsedPercent -ge 80) { "badge-red" } else { "badge-green" }
-        $html += "<tr><td>$($r.Name)</td><td align='right'>$($r.Capacity_TB)</td><td align='right'>$($r.Free_TB)</td><td align='right' class='$colClass'>$($r.UsedPercent)</td></tr>`n"
-    }
-} else {
-    $html += "<tr><td colspan='4'>Aucun repository détecté ou accès refusé.</td></tr>`n"
-}
-
-$html += @"
-    </table>
-  </div>
-
-  <div class='section'>
-    <h3>Utilisation des Tape Pools</h3>
-    <table class='table'>
-      <tr><th>Pool</th><th>Total bandes</th><th>Bandes expirées</th><th>Bandes protégées</th><th>Utilisation (%)</th></tr>
-"@
-
-if ($tapePoolStats.Count -gt 0) {
-    foreach ($p in $tapePoolStats) {
-        $col = if ($p.UsedPercent -ge 80) { "badge-red" } else { "badge-green" }
-        $html += "<tr><td>$($p.PoolName)</td><td align='right'>$($p.TotalTapes)</td><td align='right'>$($p.Expired)</td><td align='right'>$($p.Protected)</td><td align='right' class='$col'>$($p.UsedPercent)</td></tr>`n"
-    }
-} else {
-    $html += "<tr><td colspan='5'>Aucun pool de bande détecté ou accès refusé.</td></tr>`n"
-}
-
-$html += @"
-    </table>
-  </div>
-
-  <div class='section'>
-    <h3>Bandes expirant dans 7 jours</h3>
-    <table class='table'>
-      <tr><th>Barcode</th><th>Date d'expiration</th><th>MediaPool</th><th>WORM</th></tr>
-"@
-
-if ($tapesExpiring.Count -gt 0) {
-    foreach ($t in $tapesExpiring) {
-        $html += "<tr><td>$($t.Barcode)</td><td>$($t.ExpirationDate)</td><td>$($t.MediaPool)</td><td>$($t.IsWorm)</td></tr>`n"
-    }
-} else {
-    $html += "<tr><td colspan='4'>Aucune bande n'expire dans les 7 prochains jours.</td></tr>`n"
-}
-
-$html += @"
-    </table>
-  </div>
-
-  <div class='section'>
-    <h3>Configuration - éléments inactifs (>3 mois)</h3>
-    <table class='table'>
-      <tr><th>Type</th><th>Nom / Détail</th><th>Info</th></tr>
-"@
-# Inactive jobs
-if ($inactiveJobsList.Count -gt 0) {
-    foreach ($ij in $inactiveJobsList) {
-        $html += "<tr><td>Job inactif</td><td>$($ij.Name)</td><td>Scheduled: $($ij.IsScheduled) - LastRun: $($ij.LastRun)</td></tr>`n"
-    }
-} else {
-    $html += "<tr><td colspan='3'>Aucun job inactif détecté.</td></tr>`n"
-}
-# Inactive repos
-if ($inactiveReposList.Count -gt 0) {
-    foreach ($ir in $inactiveReposList) {
-        $html += "<tr><td>Repository inactif</td><td>$($ir.Name)</td><td>LastAccess: $($ir.LastAccess) - FreeGB: $($ir.FreeGB)</td></tr>`n"
-    }
-} else {
-    $html += "<tr><td colspan='3'>Aucun repository inactif détecté.</td></tr>`n"
-}
-# Inactive proxies
-if ($inactiveProxiesList.Count -gt 0) {
-    foreach ($ip in $inactiveProxiesList) {
-        $html += "<tr><td>Proxy inactif</td><td>$($ip.Name)</td><td>Enabled: $($ip.Enabled) - State: $($ip.State)</td></tr>`n"
-    }
-} else {
-    $html += "<tr><td colspan='3'>Aucun proxy inactif détecté.</td></tr>`n"
-}
-
-$html += @"
-    </table>
-  </div>
-
-  <div class='footer'>
-    <div>Notes: Les taux sont calculés sur les 30 derniers jours pour les jobs actifs et planifiés uniquement.</div>
-    <div>Script généré pour Veeam 12.3.1.1139 - exécuté à $ReportTimestamp</div>
-  </div>
-
+<html><head>
+<style>
+body { font-family: Arial; background:#f8f8f8; text-align:center; }
+h2 { color:#2d862d; }
+.section { border:1px solid #ddd; background:white; padding:15px; margin:15px; border-radius:10px; display:inline-block; }
+</style>
+</head><body>
+<h2> Tableau de bord Veeam - Rapport KPI</h2>
+<div class='section'>
+<h3> Sauvegardes sur disque</h3>
+$(Get-GaugeHTML "Réussite" $($backupStats.Success) "#00b336")
+$(Get-GaugeHTML "Échecs" $($backupStats.Failed) "#e00000")
+</div>
+<div class='section'>
+<h3> Sauvegardes sur bande</h3>
+$(Get-GaugeHTML "Réussite" $($tapeStats.Success) "#00b336")
+$(Get-GaugeHTML "Échecs" $($tapeStats.Failed) "#e00000")
+</div>
+<div class='section'>
+<h3> Réplications</h3>
+$(Get-GaugeHTML "Réussite" $($replicaStats.Success) "#00b336")
+$(Get-GaugeHTML "Échecs" $($replicaStats.Failed) "#e00000")
+</div>
+<div class='section'>
+<h3> Utilisation des Repositories</h3>
+<table border='1' cellspacing='0' cellpadding='5' align='center'>
+<tr><th>Nom</th><th>Utilisation (%)</th><th>Libre (TB)</th><th>Capacité (TB)</th></tr>
+$(foreach ($r in $repositories) {
+    "<tr><td>$($r.Name)</td><td>$($r.UsedPercent)%</td><td>$($r.FreeTB)</td><td>$($r.CapacityTB)</td></tr>"
+})
+</table>
+</div>
+<div class='section'>
+<h3> Pool de bandes</h3>
+<table border='1' cellspacing='0' cellpadding='5' align='center'>
+<tr><th>Nom</th><th>Utilisation (%)</th><th>Nombre total de bandes</th></tr>
+$(foreach ($t in $tapePools) {
+    "<tr><td>$($t.Name)</td><td>$($t.UsedPercent)%</td><td>$($t.TotalTapes)</td></tr>"
+})
+</table>
+</div>
 </body></html>
 "@
 
-# Write file
-$dir = Split-Path -Path $ReportPath -Parent
-if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
-Set-Content -Path $ReportPath -Value $html -Encoding UTF8
-
-Write-Host "Rapport généré : $ReportPath" -ForegroundColor Green
-
-# -----------------------------
-# ENVOI MAIL - Bloc distinct (activer/désactiver manuellement)
-# -----------------------------
-# Pour activer l'envoi, modifier $SendInBody/$SendAsAttachment à $true et renseigner les paramètres SMTP au début du script.
-if ($SendInBody -or $SendAsAttachment) {
-    try {
-        $bodyHtml = Get-Content -Path $ReportPath -Raw
-        $mailParams = @{
-            SmtpServer = $SMTPServer
-            Port       = $SMTPPort
-            From       = $MailFrom
-            To         = $MailTo
-            Subject    = $MailSubject
-            Body       = $bodyHtml
-            BodyAsHtml = $true
-        }
-        if ($SendAsAttachment) { $mailParams.Add("Attachments",$ReportPath) }
-        # Envoi
-        Send-MailMessage @mailParams
-        Write-Host "Email envoyé à $MailTo" -ForegroundColor Green
-    } catch {
-        Write-Warning "Envoi mail échoué: $($_.Exception.Message)"
-    }
-} else {
-    Write-Host "Envoi mail désactivé. Activez \$SendInBody ou \$SendAsAttachment pour envoyer le rapport." -ForegroundColor Yellow
-}
-# -----------------------------
-# FIN
-# -----------------------------
+# --- Enregistrement du rapport ---
+$reportPath = "C:\Reports\Veeam_KPI_Report.html"
+New-Item -ItemType Directory -Force -Path (Split-Path $reportPath) | Out-Null
+$html | Out-File -FilePath $reportPath -Encoding UTF8
+Write-Host " Rapport généré : $reportPath"
