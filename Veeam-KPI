@@ -1,0 +1,187 @@
+<#
+=========================================================
+     VEEAM KPI DASHBOARD REPORT - v12.3.1.1139
+     Auteur : Hermann BILE
+     Description : Génère un rapport complet des KPIs
+=========================================================
+#>
+
+# Importer le module Veeam PowerShell
+Import-Module Veeam.Backup.PowerShell -ErrorAction SilentlyContinue
+Connect-VBRServer -Server localhost | Out-Null
+
+# ============================
+# PARAMÈTRES DU RAPPORT
+# ============================
+$ReportPath = "C:\Reports\Veeam_KPI_Report.html"
+$SMTPServer = "mail.tondomaine.local"
+$SMTPPort   = 25
+$From       = "veeam-report@tondomaine.local"
+$To         = "admin-it@tondomaine.local"
+$Subject    = "Rapport KPI Veeam - $(Get-Date -Format 'dd/MM/yyyy HH:mm')"
+
+# ============================
+#  JOBS - BACKUP / REPLICA / TAPE
+# ============================
+
+function Get-JobStats($jobType) {
+    $jobs = Get-VBRJob | Where-Object { $_.JobType -eq $jobType -and $_.IsScheduleEnabled -eq $true -and $_.IsActive -eq $true }
+    $sessions = $jobs | Get-VBRJobSession | Where-Object {$_.EndTime -gt (Get-Date).AddDays(-30)} # Sur 30 jours
+    $total = $sessions.Count
+    $success = ($sessions | Where-Object {$_.Result -eq "Success"}).Count
+    $failed = ($sessions | Where-Object {$_.Result -eq "Failed"}).Count
+    if ($total -eq 0) { $successRate = 0; $failRate = 0 }
+    else {
+        $successRate = [math]::Round(($success / $total) * 100, 1)
+        $failRate = [math]::Round(($failed / $total) * 100, 1)
+    }
+    return [PSCustomObject]@{
+        Type = $jobType
+        Total = $total
+        SuccessRate = $successRate
+        FailRate = $failRate
+    }
+}
+
+$BackupStats   = Get-JobStats "Backup"
+$ReplicaStats  = Get-JobStats "Replica"
+$TapeJobs      = Get-VBRTapeJob | Where-Object { $_.IsScheduleEnabled -eq $true -and $_.IsActive -eq $true }
+$TapeSessions  = $TapeJobs | Get-VBRTapeJobSession
+$totalTapes = $TapeSessions.Count
+$successTapes = ($TapeSessions | Where-Object {$_.Result -eq "Success"}).Count
+$failTapes = ($TapeSessions | Where-Object {$_.Result -eq "Failed"}).Count
+$TapeStats = [PSCustomObject]@{
+    Type = "Tape"
+    Total = $totalTapes
+    SuccessRate = if ($totalTapes -eq 0) {0} else {[math]::Round(($successTapes / $totalTapes) * 100, 1)}
+    FailRate = if ($totalTapes -eq 0) {0} else {[math]::Round(($failTapes / $totalTapes) * 100, 1)}
+}
+
+# ============================
+#  STOCKAGE - REPOSITORIES
+# ============================
+
+$RepoStats = Get-VBRBackupRepository | ForEach-Object {
+    [PSCustomObject]@{
+        "Nom du Repository" = $_.Name
+        "Espace total (TB)" = [math]::Round($_.Capacity / 1TB, 2)
+        "Espace libre (TB)" = [math]::Round($_.FreeSpace / 1TB, 2)
+        "Utilisation (%)"   = [math]::Round((($_.Capacity - $_.FreeSpace) / $_.Capacity) * 100, 1)
+    }
+}
+
+# ============================
+#  STOCKAGE - TAPE POOLS
+# ============================
+$TapePools = Get-VBRTapeMediaPool | ForEach-Object {
+    $medias = Get-VBRTapeMedium -MediaPool $_
+    $total = $medias.Count
+    $expired = ($medias | Where-Object {$_.IsExpired -eq $true}).Count
+    $used = ($total - $expired)
+    [PSCustomObject]@{
+        "Nom du Pool" = $_.Name
+        "Bandes Totales" = $total
+        "Bandes Expirées" = $expired
+        "Bandes Valides" = $used
+    }
+}
+
+# ============================
+#  TAPES EXPIRANT DANS 7 JOURS
+# ============================
+
+$TapesExpiringSoon = Get-VBRTapeMedium | Where-Object {
+    $_.ExpirationDate -and $_.ExpirationDate -lt (Get-Date).AddDays(7)
+} | Select-Object Barcode, @{n='Date Expiration'; e={$_.ExpirationDate.ToString('dd/MM/yyyy')}}, @{n='Pool'; e={$_.MediaPool.Name}}
+
+# ============================
+#  CONFIGURATION VEEAM
+# ============================
+
+$InactiveJobs = Get-VBRJob | Where-Object {
+    $_.IsScheduleEnabled -eq $false -or ($_.GetLastResult() -eq $null -and $_.Info.LastRun -lt (Get-Date).AddMonths(-3))
+}
+$InactiveRepos = Get-VBRBackupRepository | Where-Object { $_.LastAccess -lt (Get-Date).AddMonths(-3) -or $_.FreeSpace -eq $_.Capacity }
+$InactiveProxies = Get-VBRViProxy | Where-Object { $_.IsEnabled -eq $false }
+
+$ConfigStats = [PSCustomObject]@{
+    "Jobs inactifs (>3 mois)" = $InactiveJobs.Count
+    "Repositories inactifs" = $InactiveRepos.Count
+    "Proxys inactifs" = $InactiveProxies.Count
+}
+
+# ============================
+#  GÉNÉRATION DU RAPPORT HTML
+# ============================
+
+$style = @"
+<style>
+body { font-family: Arial; }
+h2 { color:#0E6655; border-bottom:2px solid #0E6655; }
+table { border-collapse: collapse; width:100%; margin-bottom:20px; }
+th, td { border:1px solid #ddd; padding:8px; text-align:center; }
+th { background-color:#0E6655; color:white; }
+.success { color:green; font-weight:bold; }
+.fail { color:red; font-weight:bold; }
+</style>
+"@
+
+$HTML = @"
+<html><head>$style</head><body>
+<h1>Rapport KPI - Veeam Backup & Replication</h1>
+<h2> Taux de réussite des Jobs</h2>
+<table>
+<tr><th>Type</th><th>Succès (%)</th><th>Échecs (%)</th></tr>
+<tr><td>Backup</td><td class='success'>$($BackupStats.SuccessRate)</td><td class='fail'>$($BackupStats.FailRate)</td></tr>
+<tr><td>Replica</td><td class='success'>$($ReplicaStats.SuccessRate)</td><td class='fail'>$($ReplicaStats.FailRate)</td></tr>
+<tr><td>Tape</td><td class='success'>$($TapeStats.SuccessRate)</td><td class='fail'>$($TapeStats.FailRate)</td></tr>
+</table>
+
+<h2> Utilisation des Repositories</h2>
+$($RepoStats | ConvertTo-Html -Fragment)
+
+<h2> Utilisation des Pools de Bandes</h2>
+$($TapePools | ConvertTo-Html -Fragment)
+
+<h2> Bandes expirant dans 7 jours</h2>
+$($TapesExpiringSoon | ConvertTo-Html -Fragment)
+
+<h2> Composants inactifs</h2>
+$($ConfigStats | ConvertTo-Html -Fragment)
+
+<p><i>Rapport généré le $(Get-Date)</i></p>
+</body></html>
+"@
+
+$HTML | Out-File $ReportPath -Encoding UTF8
+
+# ============================
+#  ENVOI DU MAIL
+# ============================
+
+# === Bloc d'envoi du rapport ===
+# (Active ou désactive ici selon besoin)
+
+$SendInBody = $false     #  mettre $false pour désactiver l’envoi dans le corps du mail
+$SendAsAttachment = $false #  mettre $false pour ne pas joindre le rapport
+
+if ($SendInBody -or $SendAsAttachment) {
+    $mailParams = @{
+        From       = $From
+        To         = $To
+        Subject    = $Subject
+        SmtpServer = $SMTPServer
+        Port       = $SMTPPort
+        BodyAsHtml = $true
+        Body       = (Get-Content $ReportPath -Raw)
+    }
+    if ($SendAsAttachment) {
+        $mailParams.Add("Attachments", $ReportPath)
+    }
+    Send-MailMessage @mailParams
+}
+
+# ============================
+# FIN DU SCRIPT
+# ============================
+Disconnect-VBRServer
