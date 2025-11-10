@@ -1,0 +1,24 @@
+# -----------------------------
+# MyVeeamReport_Variable.ps1
+# Variables et valeurs par défaut pour MyVeeamReport
+# Editer ce fichier avant d'exécuter le script principal
+# -----------------------------
+
+# Chemin du rapport HTML (sera créé/écrasé)
+$ReportPath = "C:\Reports\Veeam_Dashboard_WithCharts.html"
+
+# Paramètres SMTP (remplir avant d'activer l'envoi)
+$SMTPServer = "smtp.yourdomain.local"
+$SMTPPort   = 25
+$MailFrom   = "veeam-report@yourdomain.local"
+$MailTo     = "admin@yourdomain.local"
+$MailSubject = "Veeam KPI Dashboard - $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+
+# Basculer l'envoi du mail
+$SendInBody       = $false    # true => envoie le HTML dans le corps du mail
+$SendAsAttachment = $false    # true => joint le fichier HTML
+
+# Optionnel : durée d'analyse des sessions (en jours)
+$JobsWindowDays = 30
+
+# End of variable file
