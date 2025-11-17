@@ -1,0 +1,1 @@
+Get-VBRBackupSession | Where-Object { $_.StartTime -ge (Get-Date).AddDays(-7) }
