@@ -1,11 +1,12 @@
-Get-VBRJob | Select-Object Name,
-    @{N='HasSchedule';E={
-        if ($_.ScheduleOptions.OptionsDaily.Enabled -or
-            $_.ScheduleOptions.OptionsMonthly.Enabled -or
-            $_.ScheduleOptions.OptionsPeriodically.Enabled -or
-            $_.ScheduleOptions.OptionsContinuous.Enabled) {
-            "Yes"
-        } else {
-            "No"
-        }
-    }}
+Get-VBRJob | Select Name, @{N="HasSchedule";E={
+    $s = $_.GetScheduleOptions()
+    
+    if ($s.OptionsDaily.Enabled -or
+        $s.OptionsMonthly.Enabled -or
+        $s.OptionsPeriodically.Enabled -or
+        $s.OptionsContinuous.Enabled) {
+        "Yes"
+    } else {
+        "No"
+    }
+}}
