@@ -1,0 +1,4 @@
+Get-VBRJob | Where-Object { $_.ScheduleOptions.OptionsDaily.Enabled -eq $true -or
+                            $_.ScheduleOptions.OptionsMonthly.Enabled -eq $true -or
+                            $_.ScheduleOptions.OptionsPeriodically.Enabled -eq $true -or
+                            $_.ScheduleOptions.OptionsContinuous.Enabled -eq $true }
