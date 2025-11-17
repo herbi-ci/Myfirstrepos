@@ -1,1 +1,21 @@
-Get-VBRBackupSession | Select-Object -First 1 | Get-Member
+
+PS C:\Users\Bile.hermann> Get-VBRBackupSession | Select-Object -First 1 | Get-Member | findstr /i time
+FindCreationTimeUtc                              Method     System.Nullable[datetime] FindCreationTimeUtc()                                      
+ResetEndTime                                     Method     void ResetEndTime()                                                                  
+SetCreationTime                                  Method     void SetCreationTime(datetime creationTime)                                          
+SetEndTime                                       Method     void SetEndTime(datetime endTime)                                                    
+UpdateWorkDuration                               Method     void UpdateWorkDuration(timespan workDuration)                                       
+CreationTime                                     Property   datetime CreationTime {get;}                                                         
+CreationTimeUTC                                  Property   datetime CreationTimeUTC {get;}                                                      
+EndTime                                          Property   datetime EndTime {get;}                                                              
+EndTimeUTC                                       Property   datetime EndTimeUTC {get;}                                                           
+LastProgressSaveTime                             Property   datetime LastProgressSaveTime {get;set;}                                             
+
+PS C:\Users\Bile.hermann> Get-VBRBackupSession | Select-Object -First 1 | Get-Member | findstr /i start
+FindJobStartupSpec                               Method     Veeam.Backup.Model.IJobStartupSpec FindJobStartupSpec()                              
+FindSessionStarterInfo                           Method     Veeam.Backup.Model.CSessionStarterInfo FindSessionStarterInfo()                      
+GetJobStartupSpec                                Method     Veeam.Backup.Model.IJobStartupSpec GetJobStartupSpec()                               
+Start                                            Method     void Start(Veeam.Backup.Model.CDbBackupJobInfo+Mode mode, [ref] bool isPolicySessi...
+UpdateSessionStarterInfo                         Method     void UpdateSessionStarterInfo(Veeam.Backup.Model.CSessionStarterInfo starterInfo)    
+IsStarting                                       Property   bool IsStarting {get;}                                                               
+StartupMode                                      Property   Veeam.Backup.Model.CDbBackupJobInfo+Mode StartupMode {get;}   
