@@ -1,1 +1,7 @@
-Get-VBRBackupSession | Where-Object { $_.StartTime -ge (Get-Date).AddDays(-7) }
+Job Name             State      Start Time             End Time               Result    
+--------             -----      ----------             --------               ------    
+[D]-P1-E35-APP02 ... Stopped    29/09/2025 01:10:37    29/09/2025 01:24:58    Failed    
+[D]-P1-E35-APP02 ... Stopped    18/09/2025 00:27:01    18/09/2025 00:40:33    Failed    
+[D]-P3-E35-APP03 ... Stopped    20/09/2025 20:00:21    20/09/2025 20:21:12    Success   
+[D]-P1-E35-APP02 ... Stopped    17/09/2025 00:23:01    17/09/2025 00:36:46    Failed    
+[D]-P1-E35-APP-FS... Stopped    16/09/2025 00:00:21    16/09/2025 00:08:11    Success 
