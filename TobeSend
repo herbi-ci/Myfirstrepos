@@ -1,5 +1,20 @@
-Get-VBRJob | Where-Object {
-    $_.ScheduleOptions.OptionsDaily.Enabled -or
-    $_.ScheduleOptions.OptionsMonthly.Enabled -or
-    $_.ScheduleOptions.OptionsPeriodically.Enabled
-} | Select Name
+$jobs = Get-VBRJob
+$threshold = (Get-Date).AddDays(-7)
+
+$result = foreach ($job in $jobs) {
+
+    # Récupérer dernière exécution
+    $lastRun = $job.Info.LastStateChange
+
+    # Si jamais exécuté → on considère "ancien" aussi
+    if (-not $lastRun) { 
+        $lastRun = 'NeverRun'
+    }
+
+    [PSCustomObject]@{
+        JobName = $job.Name
+        LastRun = $lastRun
+        DaysSinceLastRun = if ($lastRun -eq 'NeverRun') { 'Never' } else { (New-TimeSpan -Start $lastRun -End (Get-Date)).Days }
+        OldJob = if ($lastRun -eq 'NeverRun') { $true } else { $lastRun -lt $threshold }
+    }
+}
