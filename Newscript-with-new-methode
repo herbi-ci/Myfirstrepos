@@ -2,6 +2,8 @@
 MyVeeamReport.ps1
 Génère un rapport HTML avec donuts (global jobs + repositories + tape pools)
 Compatible Veeam 12.3.x - Exécuter dans PowerShell ISE (Admin recommandé)
+
+Modifié : récupération sessions sur N derniers jours via Get-VBRBackupSession
 #>
 
 # -------------- Charger variables --------------
@@ -12,23 +14,31 @@ try {
     Write-Host "Impossible de charger MyVeeamReport_Variable.ps1 : $($_.Exception.Message)" -ForegroundColor Red
 }
 
-# -------------- Charger module Veeam si disponible --------------
-#region Connect
+# -------------- Paramètre: fenêtre en jours (configurable) --------------
+# Si $JobsWindowDays est défini dans MyVeeamReport_Variable.ps1 -> utilisé, sinon valeur par défaut = 7
+$JobsWindowDays = if ($null -ne $JobsWindowDays) { [int]$JobsWindowDays } else { 7 }
+$sinceDays = [int]$JobsWindowDays
+$since = (Get-Date).AddDays(-1 * $sinceDays)
 
-# Connect to VBR server
+# -------------- Connexion au serveur VBR --------------
 $vbrServer = $env:computername
-Write-Host "Connecting ..."
-$OpenConnection = (Get-VBRServerSession).Server
-If ($OpenConnection -ne $vbrServer){
-  Disconnect-VBRServer
-  Try {
-    Connect-VBRServer -server $vbrServer -ErrorAction Stop
-  } Catch {
-    Write-Host "Unable to connect to VBR server - $vbrServer" -ForegroundColor Red
-    exit
-  }
+Write-Host "Connecting to VBR server: $vbrServer ..."
+try {
+    $OpenConnection = $null
+    try { $OpenConnection = (Get-VBRServerSession).Server } catch {}
+    If ($OpenConnection -ne $vbrServer){
+      try { Disconnect-VBRServer -ErrorAction SilentlyContinue } catch {}
+      Try {
+        Connect-VBRServer -server $vbrServer -ErrorAction Stop
+      } Catch {
+        Write-Host "Unable to connect to VBR server - $vbrServer" -ForegroundColor Red
+        exit 1
+      }
+    }
+} catch {
+    Write-Host "Erreur connexion VBR: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
 }
-#endregion
 
 # -------------- Fonctions Chart (.NET) --------------
 Add-Type -AssemblyName System.Windows.Forms.DataVisualization -ErrorAction SilentlyContinue
@@ -87,91 +97,119 @@ function Save-DoughnutChartToBase64 {
     return [Convert]::ToBase64String($bytes)
 }
 
-# -------------- Récupération KPI : jobs (exclure inactifs et non schedulés) --------------
-$sinceDays = if ($null -ne $JobsWindowDays) { [int]$JobsWindowDays } else { 30 }
-$since = (Get-Date).AddDays(-1 * $sinceDays)
-
 # Helper: compute success percentage from list of sessions
 function Compute-SuccessPercent {
     param([array]$sessions)
-    if (-not $sessions) { return 0 }
+    if (-not $sessions -or $sessions.Count -eq 0) { return 0 }
     $total = $sessions.Count
-    # Count success / consider string equality
     $success = ($sessions | Where-Object { $_.Result -eq 'Success' }).Count
-    # Compute percentage with rounding digit-by-digit
-    $pct = 0
-    if ($total -gt 0) {
-        # digit-by-digit safe arithmetic
-        $num = [decimal] $success
-        $den = [decimal] $total
-        $raw = ($num / $den) * 100
-        $pct = [math]::Round($raw,1)
-    }
-    return $pct
+    $num = [decimal] $success
+    $den = [decimal] $total
+    $raw = ($num / $den) * 100
+    return [math]::Round($raw,1)
 }
 
-# --- Backup jobs ---
+# -------------- Récupérer jobs actifs (backup / replica / tape) --------------
 try {
-    # Show scheduled jobs with their schedule
-
-$jobs = Get-VBRJob
-$threshold = (Get-Date).AddDays(-7)
-
-$result = foreach ($job in $jobs) {
-
-    # Récupérer dernière exécution
-    $lastRun = $job.Info.LastStateChange
-
-    # Si jamais exécuté → on considère "ancien" aussi
-    if (-not $lastRun) { 
-        $lastRun = 'NeverRun'
-    }
-
-    [PSCustomObject]@{
-        JobName = $job.Name
-        LastRun = $lastRun
-        DaysSinceLastRun = if ($lastRun -eq 'NeverRun') { 'Never' } else { (New-TimeSpan -Start $lastRun -End (Get-Date)).Days }
-        OldJob = if ($lastRun -eq 'NeverRun') { $true } else { $lastRun -lt $threshold }
-    }
+    $allJobs = Get-VBRJob -ErrorAction SilentlyContinue
+    $backupJobs  = $allJobs | Where-Object { $_.JobType -eq 'Backup'  -and $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true }
+    $replicaJobs = $allJobs | Where-Object { $_.JobType -eq 'Replica' -and $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true }
+} catch {
+    Write-Host "Erreur récupération jobs: $($_.Exception.Message)" -ForegroundColor Yellow
+    $backupJobs = @(); $replicaJobs = @()
 }
 
-    $backupSessions = @()
-    foreach ($j in $backupJobs) {
-        $s = Get-VBRJobSession -Job $j -Filter @{ CreationTime = @{ From = $since } } -ErrorAction SilentlyContinue
-        if ($s) { $backupSessions += $s }
+try {
+    $tapeJobs = Get-VBRTapeJob -ErrorAction SilentlyContinue
+    if ($tapeJobs) { $tapeJobs = $tapeJobs | Where-Object { $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true } } else { $tapeJobs = @() }
+} catch {
+    Write-Host "Erreur récupération tape jobs: $($_.Exception.Message)" -ForegroundColor Yellow
+    $tapeJobs = @()
+}
+
+# -------------- Récupérer toutes les sessions récentes (méthode correcte) --------------
+$allSessions = @()
+try {
+    # Méthode recommandée fournie : Get-VBRBackupSession | Where-Object { $_.CreationTime -ge (Get-Date).AddDays(-7) }
+    # Ici on utilise la variable $since (configurable)
+    $allSessions = Get-VBRBackupSession -ErrorAction SilentlyContinue | Where-Object { 
+        # certaines versions exposent CreationTime ; tolérance s'il y a CreationTimeUTC
+        $ct = $null
+        if ($_.PSObject.Properties['CreationTime']) { $ct = $_.CreationTime } elseif ($_.PSObject.Properties['CreationTimeUTC']) { $ct = $_.CreationTimeUTC }
+        if (-not $ct) { return $false }
+        return ($ct -ge $since)
+    }
+    if (-not $allSessions) { $allSessions = @() }
+} catch {
+    Write-Host "Erreur récupération sessions avec Get-VBRBackupSession: $($_.Exception.Message)" -ForegroundColor Yellow
+    $allSessions = @()
+}
+
+# Helper pour obtenir le job name depuis la session (selon version)
+function Get-SessionJobName {
+    param($session)
+    $name = $null
+    if ($session.PSObject.Properties['JobName']) { $name = $session.JobName -as [string] }
+    elseif ($session.PSObject.Properties['Job'] -and $session.Job) {
+        try { $name = $session.Job.Name -as [string] } catch {}
+    } elseif ($session.PSObject.Properties['Name']) {
+        # fallback si certaines sessions exposent Name
+        try { $name = $session.Name -as [string] } catch {}
+    }
+    return $name
+}
+
+# -------------- Calculs success % --------------
+try {
+    $backupNames = $backupJobs | ForEach-Object { $_.Name }
+    $backupSessions = $allSessions | Where-Object {
+        $jn = Get-SessionJobName -session $_
+        ($jn -and ($backupNames -contains $jn))
     }
     $backupSuccessPct = Compute-SuccessPercent -sessions $backupSessions
 } catch {
-    Write-Host "Erreur récupération Backup jobs: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "Erreur calcul Backup sessions: $($_.Exception.Message)" -ForegroundColor Yellow
     $backupSuccessPct = 0
 }
 
-# --- Replica jobs ---
 try {
-    $replicaJobs = Get-VBRJob | Where-Object { $_.JobType -eq 'Replica' -and $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true }
-    $replicaSessions = @()
-    foreach ($j in $replicaJobs) {
-        $s = Get-VBRJobSession -Job $j -Filter @{ CreationTime = @{ From = $since } } -ErrorAction SilentlyContinue
-        if ($s) { $replicaSessions += $s }
+    $replicaNames = $replicaJobs | ForEach-Object { $_.Name }
+    $replicaSessions = $allSessions | Where-Object {
+        $jn = Get-SessionJobName -session $_
+        ($jn -and ($replicaNames -contains $jn))
     }
     $replicaSuccessPct = Compute-SuccessPercent -sessions $replicaSessions
 } catch {
-    Write-Host "Erreur récupération Replica jobs: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "Erreur calcul Replica sessions: $($_.Exception.Message)" -ForegroundColor Yellow
     $replicaSuccessPct = 0
 }
 
-# --- Tape jobs ---
 try {
-    # tape jobs are separate object type
-    $tapeJobs = Get-VBRTapeJob | Where-Object { $_.IsActive -eq $true -and $_.IsScheduleEnabled -eq $true } -ErrorAction SilentlyContinue
+    # Tape sessions : si Get-VBRTapeJobSession est disponible, on l'utilise (et on filtre sur $since),
+    # sinon fallback en filtrant $allSessions par noms de tape jobs.
     $tapeSessions = @()
-    foreach ($t in $tapeJobs) {
-        $s = Get-VBRTapeJobSession -Job $t -Filter @{ CreationTime = @{ From = $since } } -ErrorAction SilentlyContinue
-        if ($s) { $tapeSessions += $s }
+    try {
+        $tapeSessions = Get-VBRTapeJobSession -ErrorAction SilentlyContinue | Where-Object {
+            $ct = $null
+            if ($_.PSObject.Properties['CreationTime']) { $ct = $_.CreationTime } elseif ($_.PSObject.Properties['CreationTimeUTC']) { $ct = $_.CreationTimeUTC }
+            if (-not $ct) { return $false }
+            return ($ct -ge $since)
+        }
+    } catch {
+        $tapeSessions = @()
     }
+
+    if (-not $tapeSessions -or $tapeSessions.Count -eq 0) {
+        $tapeNames = $tapeJobs | ForEach-Object { $_.Name }
+        $tapeSessions = $allSessions | Where-Object {
+            $jn = Get-SessionJobName -session $_
+            ($jn -and ($tapeNames -contains $jn))
+        }
+    }
+
     $tapeSuccessPct = Compute-SuccessPercent -sessions $tapeSessions
 } catch {
-    Write-Host "Erreur récupération Tape jobs: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "Erreur calcul Tape sessions: $($_.Exception.Message)" -ForegroundColor Yellow
     $tapeSuccessPct = 0
 }
 
@@ -185,7 +223,6 @@ try {
         try { $free = $r.Info.FreeSpace } catch { $free = 0 }
         $usedPct = 0
         if ($cap -gt 0) {
-            # Compute used percent digit-by-digit
             $usedPct = [math]::Round((([decimal]($cap - $free) / [decimal]$cap) * 100),1)
         }
         $repoStats += [PSCustomObject]@{ Name = $r.Name; UsedPercent = $usedPct; Capacity_TB = ([math]::Round($cap/1TB,2)); Free_TB = ([math]::Round($free/1TB,2)) }
@@ -204,36 +241,7 @@ try {
     }
 } catch { Write-Host "Erreur tape pools: $($_.Exception.Message)" -ForegroundColor Yellow }
 
-# -------------- Donuts (global jobs + per repo/pool) --------------
-# Colors: reuse your existing colors — adjust hex if you have exact ones; default Veeam green used here.
-$colorSuccess = '#00B336'   # vert réussite (changer si tu as une autre couleur dans ton rapport)
-$colorFail    = '#E53935'   # rouge échec
-
-# Global job donuts
-$img_backup = Save-DoughnutChartToBase64 -Percent $backupSuccessPct -Title "Backup Success" -Color $colorSuccess
-$img_replica = Save-DoughnutChartToBase64 -Percent $replicaSuccessPct -Title "Replica Success" -Color $colorSuccess
-$img_tape    = Save-DoughnutChartToBase64 -Percent $tapeSuccessPct -Title "Tape Success" -Color $colorSuccess
-
-# Repo donuts (one per repo)
-$repoImgMap = @()
-foreach ($r in $repoStats) {
-    $pct = [double]$r.UsedPercent
-    # we want donut showing free vs used: percentUsed => color red if >=80
-    $color = if ($pct -ge 80) { $colorFail } else { $colorSuccess }
-    $img = Save-DoughnutChartToBase64 -Percent $pct -Title ("Repo: " + $r.Name) -Color $color
-    $repoImgMap += [PSCustomObject]@{ Name = $r.Name; ImgBase64 = $img; UsedPercent = $pct; Capacity_TB = $r.Capacity_TB; Free_TB = $r.Free_TB }
-}
-
-# Tape pool donuts
-$poolImgMap = @()
-foreach ($p in $tapePoolStats) {
-    $pct = [double]$p.UsedPercent
-    $color = if ($pct -ge 80) { $colorFail } else { $colorSuccess }
-    $img = Save-DoughnutChartToBase64 -Percent $pct -Title ("Pool: " + $p.PoolName) -Color $color
-    $poolImgMap += [PSCustomObject]@{ Name = $p.PoolName; ImgBase64 = $img; UsedPercent = $pct; TotalTapes = $p.TotalTapes; Expired = $p.Expired }
-}
-
-# -------------- Tapes expiring (7 jours) --------------
+# -------------- Tapes expirant (7 jours) --------------
 $tapesExpiring = @()
 try {
     $allTapes = Get-VBRTapeMedium -ErrorAction SilentlyContinue
@@ -280,6 +288,33 @@ try {
         }
     }
 } catch { Write-Host "Erreur composants inactifs: $($_.Exception.Message)" -ForegroundColor Yellow }
+
+# -------------- Donuts (global jobs + per repo/pool) --------------
+$colorSuccess = '#00B336'   # vert réussite
+$colorFail    = '#E53935'   # rouge échec
+
+# Global job donuts
+$img_backup = Save-DoughnutChartToBase64 -Percent $backupSuccessPct -Title "Backup Success" -Color $colorSuccess
+$img_replica = Save-DoughnutChartToBase64 -Percent $replicaSuccessPct -Title "Replica Success" -Color $colorSuccess
+$img_tape    = Save-DoughnutChartToBase64 -Percent $tapeSuccessPct -Title "Tape Success" -Color $colorSuccess
+
+# Repo donuts (one per repo)
+$repoImgMap = @()
+foreach ($r in $repoStats) {
+    $pct = [double]$r.UsedPercent
+    $color = if ($pct -ge 80) { $colorFail } else { $colorSuccess }
+    $img = Save-DoughnutChartToBase64 -Percent $pct -Title ("Repo: " + $r.Name) -Color $color
+    $repoImgMap += [PSCustomObject]@{ Name = $r.Name; ImgBase64 = $img; UsedPercent = $pct; Capacity_TB = $r.Capacity_TB; Free_TB = $r.Free_TB }
+}
+
+# Tape pool donuts
+$poolImgMap = @()
+foreach ($p in $tapePoolStats) {
+    $pct = [double]$p.UsedPercent
+    $color = if ($pct -ge 80) { $colorFail } else { $colorSuccess }
+    $img = Save-DoughnutChartToBase64 -Percent $pct -Title ("Pool: " + $p.PoolName) -Color $color
+    $poolImgMap += [PSCustomObject]@{ Name = $p.PoolName; ImgBase64 = $img; UsedPercent = $pct; TotalTapes = $p.TotalTapes; Expired = $p.Expired }
+}
 
 # -------------- Génération HTML final --------------
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -400,6 +435,7 @@ $html += "<div class='card small'>Note: Données calculées sur les $sinceDays d
 $html += "</body></html>"
 
 # -------------- Enregistrer le rapport --------------
+if (-not $ReportPath) { $ReportPath = Join-Path $env:TEMP "Veeam_KPI_Report.html" }
 $dir = Split-Path -Path $ReportPath -Parent
 if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
 Set-Content -Path $ReportPath -Value $html -Encoding UTF8
