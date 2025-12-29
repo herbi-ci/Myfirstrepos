@@ -1,0 +1,146 @@
+<#
+Veeam KPI Dashboard - BACKUP ONLY
+Sessions récupérées via Get-VBRBackupSession
+Compatible Veeam Backup & Replication 12.x
+#>
+
+# -----------------------------
+# CONFIGURATION
+# -----------------------------
+$ReportPath = "C:\Reports\Veeam_Backup_Dashboard.html"
+$ReportTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$since = (Get-Date).AddDays(-30)
+
+# -----------------------------
+# Charger module Veeam
+# -----------------------------
+if (Get-Module -ListAvailable -Name "Veeam.Backup.PowerShell") {
+    Import-Module Veeam.Backup.PowerShell
+} else {
+    Add-PSSnapin VeeamPSSnapIn
+}
+
+Connect-VBRServer -Server "localhost" | Out-Null
+
+# -----------------------------
+# Fonction Donut SVG
+# -----------------------------
+function Get-DonutSVG ($percent, $label, $size=120, $thickness=18, $color="#00B336") {
+    $r = ($size/2) - ($thickness/2)
+    $circ = 2 * [math]::PI * $r
+    $offset = $circ * (1 - ($percent/100))
+@"
+<svg width='$size' height='$size' viewBox='0 0 $size $size'>
+ <g transform='rotate(-90 $($size/2) $($size/2))'>
+  <circle cx='$($size/2)' cy='$($size/2)' r='$r' stroke='#e9ecef' stroke-width='$thickness' fill='none'/>
+  <circle cx='$($size/2)' cy='$($size/2)' r='$r' stroke='$color' stroke-width='$thickness'
+          stroke-dasharray='$circ' stroke-dashoffset='$offset' stroke-linecap='round' fill='none'/>
+ </g>
+ <text x='50%' y='50%' text-anchor='middle' dominant-baseline='middle'
+       font-family='Arial' font-size='14'>$label</text>
+</svg>
+"@
+}
+
+# -----------------------------
+# RÉCUPÉRATION DES SESSIONS BACKUP (LOGIQUE ORIGINALE)
+# -----------------------------
+$backupSessions = Get-VBRBackupSession |
+Where-Object { $_.CreationTime -ge $since }
+
+$jobStats = $backupSessions |
+Group-Object JobName |
+ForEach-Object {
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
+
+    [PSCustomObject]@{
+        JobType = "Backup"
+        JobName = $_.Name
+        Success = $success
+        Failed  = $failed
+        Warning = $warning
+        Total   = $total
+        PercentSuccess = if ($total -gt 0) { [math]::Round(($success/$total)*100,1) } else { 0 }
+    }
+}
+
+# -----------------------------
+# KPI GLOBAL BACKUP
+# -----------------------------
+$totalSuccess = ($jobStats | Measure-Object Success -Sum).Sum
+$totalFailed  = ($jobStats | Measure-Object Failed  -Sum).Sum
+$totalWarning = ($jobStats | Measure-Object Warning -Sum).Sum
+$totalRuns    = $totalSuccess + $totalFailed + $totalWarning
+
+$globalPercent = if ($totalRuns -gt 0) {
+    [math]::Round(($totalSuccess/$totalRuns)*100,1)
+} else { 0 }
+
+$donutColor = if ($globalPercent -ge 80) { "#00B336" } else { "#E31E24" }
+
+# -----------------------------
+# HTML
+# -----------------------------
+$style = @"
+<style>
+body { font-family: Arial; background:#f8f9fa; margin:20px; }
+h1 { text-align:center; }
+.card { width:220px; margin:auto; background:#fff; padding:15px;
+        box-shadow:0 2px 6px rgba(0,0,0,.1); border-radius:8px; text-align:center; }
+table { width:90%; margin:30px auto; border-collapse:collapse; }
+th, td { border:1px solid #ddd; padding:6px; text-align:center; }
+th { background:#efefef; }
+.green { color:#00B336; font-weight:bold; }
+.red { color:#E31E24; font-weight:bold; }
+</style>
+"@
+
+$html = @"
+<!DOCTYPE html>
+<html>
+<head><meta charset='utf-8'><title>Veeam Backup Dashboard</title>$style</head>
+<body>
+
+<h1>Veeam Backup Dashboard<br>$ReportTimestamp</h1>
+
+<div class='card'>
+ <h3>Backup – Global Success</h3>
+ $(Get-DonutSVG -percent $globalPercent -label "$globalPercent`%" -color $donutColor)
+</div>
+
+<h2 style='text-align:center;margin-top:40px;'>Détails par Job (30 derniers jours)</h2>
+
+<table>
+<tr>
+ <th>Job</th>
+ <th>Success</th>
+ <th>Warning</th>
+ <th>Failed</th>
+ <th>% Success</th>
+</tr>
+"@
+
+foreach ($job in $jobStats | Sort-Object Failed -Descending) {
+    $class = if ($job.PercentSuccess -ge 80) { "green" } else { "red" }
+    $html += "<tr>
+<td>$($job.JobName)</td>
+<td>$($job.Success)</td>
+<td>$($job.Warning)</td>
+<td>$($job.Failed)</td>
+<td class='$class'>$($job.PercentSuccess)%</td>
+</tr>"
+}
+
+$html += "</table></body></html>"
+
+# -----------------------------
+# EXPORT
+# -----------------------------
+$dir = Split-Path $ReportPath -Parent
+if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+Set-Content -Path $ReportPath -Value $html -Encoding UTF8
+
+Write-Host "Dashboard Backup généré : $ReportPath" -ForegroundColor Green
