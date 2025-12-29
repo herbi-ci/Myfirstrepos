@@ -1,0 +1,161 @@
+# ============================
+# PARAMÈTRES
+# ============================
+$Days = 7
+$OutputFile = "Veeam_Dashboard.html"
+
+# ============================
+# COLLECTE DES DONNÉES
+# ============================
+$Data = Get-VBRBackupSession |
+Where-Object {
+    $_.CreationTime -ge (Get-Date).AddDays(-$Days)
+} |
+Group-Object JobName |
+ForEach-Object {
+    [PSCustomObject]@{
+        JobName  = $_.Name
+        Success  = ($_.Group | Where-Object Result -eq "Success").Count
+        Failed   = ($_.Group | Where-Object Result -eq "Failed").Count
+        Warning  = ($_.Group | Where-Object Result -eq "Warning").Count
+        TotalRun = $_.Count
+    }
+}
+
+# Totaux globaux
+$GlobalSuccess = ($Data | Measure-Object Success -Sum).Sum
+$GlobalFailed  = ($Data | Measure-Object Failed  -Sum).Sum
+$GlobalWarning = ($Data | Measure-Object Warning -Sum).Sum
+
+# ============================
+# GÉNÉRATION HTML
+# ============================
+$Html = @"
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Veeam – Dashboard Santé</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background: #f4f6f8;
+}
+h1 {
+    text-align: center;
+}
+.container {
+    display: flex;
+    justify-content: center;
+    margin-top: 40px;
+}
+.card {
+    background: white;
+    padding: 25px;
+    border-radius: 15px;
+    width: 380px;
+    text-align: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+table {
+    width: 90%;
+    margin: 40px auto;
+    border-collapse: collapse;
+}
+th, td {
+    padding: 10px;
+    border-bottom: 1px solid #ddd;
+}
+th {
+    background: #2c3e50;
+    color: white;
+}
+.status-ok { color: #2ecc71; font-weight: bold; }
+.status-warn { color: #f1c40f; font-weight: bold; }
+.status-fail { color: #e74c3c; font-weight: bold; }
+</style>
+</head>
+
+<body>
+
+<h1>Veeam – État de santé des sauvegardes (7 derniers jours)</h1>
+
+<div class="container">
+    <div class="card">
+        <h3>Vue globale</h3>
+        <canvas id="donut"></canvas>
+    </div>
+</div>
+
+<table>
+<tr>
+    <th>Job</th>
+    <th>Success</th>
+    <th>Warning</th>
+    <th>Failed</th>
+    <th>État</th>
+</tr>
+"@
+
+# ============================
+# TABLEAU PAR JOB
+# ============================
+foreach ($job in $Data) {
+
+    if ($job.Failed -gt 0) {
+        $Status = "<span class='status-fail'> Critique</span>"
+    }
+    elseif ($job.Warning -gt 0) {
+        $Status = "<span class='status-warn'> Alerte</span>"
+    }
+    else {
+        $Status = "<span class='status-ok'> OK</span>"
+    }
+
+    $Html += "<tr>
+        <td>$($job.JobName)</td>
+        <td>$($job.Success)</td>
+        <td>$($job.Warning)</td>
+        <td>$($job.Failed)</td>
+        <td>$Status</td>
+    </tr>"
+}
+
+# ============================
+# SCRIPT JAVASCRIPT (DONUT)
+# ============================
+$Html += @"
+</table>
+
+<script>
+new Chart(document.getElementById('donut'), {
+    type: 'doughnut',
+    data: {
+        labels: ['Success', 'Failed', 'Warning'],
+        datasets: [{
+            data: [$GlobalSuccess, $GlobalFailed, $GlobalWarning],
+            backgroundColor: ['#2ecc71', '#e74c3c', '#f1c40f']
+        }]
+    },
+    options: {
+        plugins: {
+            legend: {
+                position: 'bottom'
+            }
+        }
+    }
+});
+</script>
+
+</body>
+</html>
+"@
+
+# ============================
+# ÉCRITURE DU FICHIER
+# ============================
+$Html | Out-File $OutputFile -Encoding UTF8
+
+Write-Host "Dashboard généré : $OutputFile"
