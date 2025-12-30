@@ -1,0 +1,6 @@
+Get-VBRJob | Where-Object { $_.JobType -eq "Replica" }
+
+Job Name                  Type            State      Last Result  Description
+--------                  ----            -----      -----------  -----------
+[R]-P3-E35-EXCH-Q         VMware Repli... Stopped    None         
+[R]-P3-E35-APP-Q          VMware Repli... Stopped    Success
