@@ -1,0 +1,20 @@
+# Récupérer tous les jobs de réplication
+$replicaJobs = Get-VBRJob | Where-Object { $_.JobType -eq "Replica" }
+
+# Total de jobs
+$totalJobs = $replicaJobs.Count
+
+# Comptage des différents statuts
+$successCount = ($replicaJobs | Where-Object { $_.LastResult -eq "Success" }).Count
+$failedCount  = ($replicaJobs | Where-Object { $_.LastResult -eq "Failed" }).Count
+$noneCount    = ($replicaJobs | Where-Object { $_.LastResult -eq $null -or $_.LastResult -eq "None" }).Count
+
+# Calcul des pourcentages
+$successPercent = if ($totalJobs -gt 0) { [math]::Round(($successCount / $totalJobs) * 100,1) } else { 0 }
+$failedPercent  = if ($totalJobs -gt 0) { [math]::Round(($failedCount / $totalJobs) * 100,1) } else { 0 }
+$nonePercent    = if ($totalJobs -gt 0) { [math]::Round(($noneCount / $totalJobs) * 100,1) } else { 0 }
+
+# Affichage
+Write-Host "Success: $successCount ($successPercent`%)"
+Write-Host "Failed:  $failedCount ($failedPercent`%)"
+Write-Host "None:    $noneCount ($nonePercent`%)"
