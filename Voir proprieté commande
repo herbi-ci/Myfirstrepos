@@ -1,0 +1,5 @@
+# Récupérer un job de réplication
+$job = Get-VBRJob | Where-Object { $_.JobType -eq "Replica" } | Select-Object -First 1
+
+# Lister toutes les propriétés
+$job | Get-Member -MemberType Properties
