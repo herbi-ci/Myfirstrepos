@@ -1,0 +1,41 @@
+# =================================================
+# REPLICATION – VIA Get-VBRJob UNIQUEMENT
+# =================================================
+$replicaStats = Get-VBRJob |
+Where-Object { $_.JobType -eq "Replica" } |
+ForEach-Object {
+
+    $success = 0
+    $failed  = 0
+    $warning = 0
+    $total   = 0
+
+    switch ($_.LastResult) {
+        "Success" {
+            $success = 1
+            $total   = 1
+        }
+        "Failed" {
+            $failed = 1
+            $total  = 1
+        }
+        "Warning" {
+            $warning = 1
+            $total   = 1
+        }
+        default {
+            # None / Null → job jamais exécuté
+            $total = 0
+        }
+    }
+
+    [PSCustomObject]@{
+        Type     = "Replication"
+        JobName  = $_.Name
+        Success  = $success
+        Warning  = $warning
+        Failed   = $failed
+        Total    = $total
+        Percent  = if ($total -gt 0) { [math]::Round(($success / $total) * 100,1) } else { 0 }
+    }
+}
