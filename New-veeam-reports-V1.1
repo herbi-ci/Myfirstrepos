@@ -1,0 +1,187 @@
+<#
+Veeam KPI Dashboard – Backup / Replication / Tape
+Logique sessions homogène
+Compatible Veeam Backup & Replication 12.x
+#>
+
+# -----------------------------
+# CONFIG
+# -----------------------------
+$ReportPath = "C:\Reports\Veeam_KPI_Dashboard.html"
+$since = (Get-Date).AddDays(-30)
+$ReportTimestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+# -----------------------------
+# Chargement module Veeam
+# -----------------------------
+if (Get-Module -ListAvailable -Name "Veeam.Backup.PowerShell") {
+    Import-Module Veeam.Backup.PowerShell
+} else {
+    Add-PSSnapin VeeamPSSnapIn
+}
+Connect-VBRServer -Server "localhost" | Out-Null
+
+# -----------------------------
+# Donut SVG
+# -----------------------------
+function Get-DonutSVG ($percent, $label, $color="#00B336", $size=120, $thickness=18) {
+    $r = ($size/2) - ($thickness/2)
+    $circ = 2 * [math]::PI * $r
+    $offset = $circ * (1 - ($percent/100))
+@"
+<svg width='$size' height='$size' viewBox='0 0 $size $size'>
+ <g transform='rotate(-90 $($size/2) $($size/2))'>
+  <circle cx='$($size/2)' cy='$($size/2)' r='$r' stroke='#e9ecef' stroke-width='$thickness' fill='none'/>
+  <circle cx='$($size/2)' cy='$($size/2)' r='$r' stroke='$color' stroke-width='$thickness'
+          stroke-dasharray='$circ' stroke-dashoffset='$offset' stroke-linecap='round' fill='none'/>
+ </g>
+ <text x='50%' y='50%' text-anchor='middle' dominant-baseline='middle'
+       font-family='Arial' font-size='14'>$label</text>
+</svg>
+"@
+}
+
+# =================================================
+# BACKUP – via Get-VBRBackupSession (LOGIQUE ORIGINE)
+# =================================================
+$backupSessions = Get-VBRBackupSession |
+Where-Object { $_.CreationTime -ge $since }
+
+$backupStats = $backupSessions |
+Group-Object JobName |
+ForEach-Object {
+    $s = ($_.Group | Where-Object Result -eq "Success").Count
+    $f = ($_.Group | Where-Object Result -eq "Failed").Count
+    $w = ($_.Group | Where-Object Result -eq "Warning").Count
+    $t = $_.Count
+
+    [PSCustomObject]@{
+        Type="Backup"; JobName=$_.Name
+        Success=$s; Failed=$f; Warning=$w; Total=$t
+        Percent = if ($t -gt 0) {[math]::Round(($s/$t)*100,1)} else {0}
+    }
+}
+
+# =================================================
+# REPLICATION – via Get-VBRJob + Get-VBRJobSession
+# =================================================
+$replicaJobs = Get-VBRJob | Where-Object { $_.JobType -eq "Replica" }
+$replicaSessions = @()
+
+foreach ($job in $replicaJobs) {
+    $replicaSessions += Get-VBRJobSession -Job $job |
+                        Where-Object { $_.CreationTime -ge $since }
+}
+
+$replicaStats = $replicaSessions |
+Group-Object JobName |
+ForEach-Object {
+    $s = ($_.Group | Where-Object Result -eq "Success").Count
+    $f = ($_.Group | Where-Object Result -eq "Failed").Count
+    $w = ($_.Group | Where-Object Result -eq "Warning").Count
+    $t = $_.Count
+
+    [PSCustomObject]@{
+        Type="Replication"; JobName=$_.Name
+        Success=$s; Failed=$f; Warning=$w; Total=$t
+        Percent = if ($t -gt 0) {[math]::Round(($s/$t)*100,1)} else {0}
+    }
+}
+
+# =================================================
+# TAPE – via Get-VBRTapeJob + Get-VBRTapeJobSession
+# =================================================
+$tapeJobs = Get-VBRTapeJob
+$tapeSessions = @()
+
+foreach ($job in $tapeJobs) {
+    $tapeSessions += Get-VBRTapeJobSession -Job $job |
+                     Where-Object { $_.CreationTime -ge $since }
+}
+
+$tapeStats = $tapeSessions |
+Group-Object JobName |
+ForEach-Object {
+    $s = ($_.Group | Where-Object Result -eq "Success").Count
+    $f = ($_.Group | Where-Object Result -eq "Failed").Count
+    $w = ($_.Group | Where-Object Result -eq "Warning").Count
+    $t = $_.Count
+
+    [PSCustomObject]@{
+        Type="Tape"; JobName=$_.Name
+        Success=$s; Failed=$f; Warning=$w; Total=$t
+        Percent = if ($t -gt 0) {[math]::Round(($s/$t)*100,1)} else {0}
+    }
+}
+
+# =================================================
+# KPI GLOBALS
+# =================================================
+function Get-GlobalKPI($stats) {
+    $s = ($stats | Measure-Object Success -Sum).Sum
+    $f = ($stats | Measure-Object Failed -Sum).Sum
+    $w = ($stats | Measure-Object Warning -Sum).Sum
+    $t = $s + $f + $w
+    if ($t -eq 0) { return @{Percent=0; Color="#999"} }
+    $p = [math]::Round(($s/$t)*100,1)
+    return @{Percent=$p; Color= if ($p -ge 80) {"#00B336"} else {"#E31E24"} }
+}
+
+$kpiBackup  = Get-GlobalKPI $backupStats
+$kpiReplica = Get-GlobalKPI $replicaStats
+$kpiTape    = Get-GlobalKPI $tapeStats
+
+# =================================================
+# HTML
+# =================================================
+$style = @"
+<style>
+body { font-family:Arial; background:#f8f9fa; margin:20px }
+h1,h2 { text-align:center }
+.kpis { display:flex; justify-content:center; gap:30px }
+.card { background:#fff; padding:15px; border-radius:8px;
+        box-shadow:0 2px 6px rgba(0,0,0,.1); text-align:center }
+table { width:95%; margin:20px auto; border-collapse:collapse }
+th,td { border:1px solid #ddd; padding:6px; text-align:center }
+th { background:#efefef }
+.green { color:#00B336; font-weight:bold }
+.red { color:#E31E24; font-weight:bold }
+</style>
+"@
+
+$html = @"
+<!DOCTYPE html>
+<html><head><meta charset='utf-8'><title>Veeam KPI Dashboard</title>$style</head>
+<body>
+
+<h1>Veeam KPI Dashboard<br>$ReportTimestamp</h1>
+
+<div class='kpis'>
+ <div class='card'><h3>Backup</h3>$(Get-DonutSVG $kpiBackup.Percent "$($kpiBackup.Percent)%")</div>
+ <div class='card'><h3>Replication</h3>$(Get-DonutSVG $kpiReplica.Percent "$($kpiReplica.Percent)%")</div>
+ <div class='card'><h3>Tape</h3>$(Get-DonutSVG $kpiTape.Percent "$($kpiTape.Percent)%")</div>
+</div>
+"@
+
+function Add-Table($title,$stats) {
+    $out = "<h2>$title</h2><table><tr><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th></tr>"
+    foreach ($j in $stats | Sort-Object Failed -Descending) {
+        $cls = if ($j.Percent -ge 80) {"green"} else {"red"}
+        $out += "<tr><td>$($j.JobName)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td></tr>"
+    }
+    return $out + "</table>"
+}
+
+$html += Add-Table "Backup – Détails" $backupStats
+$html += Add-Table "Replication – Détails" $replicaStats
+$html += Add-Table "Tape – Détails" $tapeStats
+$html += "</body></html>"
+
+# -----------------------------
+# EXPORT
+# -----------------------------
+$dir = Split-Path $ReportPath -Parent
+if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+Set-Content -Path $ReportPath -Value $html -Encoding UTF8
+
+Write-Host "Dashboard généré : $ReportPath" -ForegroundColor Green
