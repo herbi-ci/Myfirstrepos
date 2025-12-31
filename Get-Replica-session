@@ -1,51 +1,51 @@
-# Load Veeam PowerShell module or snap-in
-try {
-    if (Get-Module -ListAvailable -Name Veeam.Backup.PowerShell) {
-        Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
-    } elseif (-not (Get-PSSnapin -Name VeeamPSSnapIn -ErrorAction SilentlyContinue)) {
-        Add-PSSnapin VeeamPSSnapIn -ErrorAction Stop
-    }
-} catch {
-    Write-Error "Failed to load Veeam PowerShell module/snap-in. Ensure Veeam Backup & Replication console is installed."
-    exit 1
-}
-
-# Get all replica jobs
+# =================================================
+# REPLICATION – VIA FindLastSession (FIABLE)
+# =================================================
 $replicaJobs = Get-VBRJob | Where-Object { $_.JobType -eq "Replica" }
 
-if (-not $replicaJobs) {
-    Write-Host "No replica jobs found." -ForegroundColor Yellow
-    exit 0
-}
+$replicaStats = foreach ($job in $replicaJobs) {
 
-# Counters
-$totalJobs = 0
-$successCount = 0
-$failCount = 0
+    $success = 0
+    $failed  = 0
+    $warning = 0
+    $none    = 0
+    $total   = 1   # 1 job = 1 résultat
 
-foreach ($job in $replicaJobs) {
     $lastSession = $job.FindLastSession()
-    if ($lastSession) {
-        $totalJobs++
+
+    if ($null -eq $lastSession) {
+        $none = 1
+    }
+    else {
         switch ($lastSession.Result) {
-            "Success" { $successCount++ }
-            "Failed"  { $failCount++ }
-            default   { } # Ignore warnings or other states
+            "Success" { $success = 1 }
+            "Failed"  { $failed  = 1 }
+            "Warning" { $warning = 1 }
+            default   { $none = 1 }
         }
+    }
+
+    $percent = if ($success -eq 1) { 100 } else { 0 }
+
+    [PSCustomObject]@{
+        Type     = "Replication"
+        JobName  = $job.Name
+        Success  = $success
+        Warning  = $warning
+        Failed   = $failed
+        None     = $none
+        Total    = $total
+        Percent  = $percent
     }
 }
 
-if ($totalJobs -eq 0) {
-    Write-Host "No completed replica job sessions found." -ForegroundColor Yellow
-    exit 0
-}
+# KPI globaux Réplication
+$rpSuccess = ($replicaStats | Measure-Object Success -Sum).Sum
+$rpFailed  = ($replicaStats | Measure-Object Failed  -Sum).Sum
+$rpWarning = ($replicaStats | Measure-Object Warning -Sum).Sum
+$rpNone    = ($replicaStats | Measure-Object None    -Sum).Sum
+$rpTotal   = $replicaStats.Count
 
-# Calculate percentages
-$successPercent = [math]::Round(($successCount / $totalJobs) * 100, 2)
-$failPercent    = [math]::Round(($failCount / $totalJobs) * 100, 2)
-
-# Output results
-Write-Host "===== Replica Job Status Summary =====" -ForegroundColor Cyan
-Write-Host "Total Jobs Checked : $totalJobs"
-Write-Host "Successful Jobs    : $successCount ($successPercent`%)" -ForegroundColor Green
-Write-Host "Failed Jobs        : $failCount ($failPercent`%)" -ForegroundColor Red
+$rpPercent = if ($rpTotal -gt 0) {
+    [math]::Round(($rpSuccess / $rpTotal) * 100,1)
+} else { 0 }
