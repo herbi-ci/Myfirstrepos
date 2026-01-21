@@ -1,0 +1,6 @@
+   $since  = (Get-Date).AddDays(-30)
+   $tapejob = Get-VBRTapeJob 
+   
+   $var=Foreach ($object in $tapejob){
+
+   Get-VBRTapeBackupSession  -Job $Object | Where-Object {$_.CreationTime -ge $since }} 
