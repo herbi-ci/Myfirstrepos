@@ -1,0 +1,238 @@
+# =================================================
+# PARAMÈTRES
+# =================================================
+$since  = (Get-Date).AddDays(-30)
+$output = "C:\Temp\Veeam_Health_Dashboard.html"
+
+# =================================================
+# BACKUP DISQUE
+# =================================================
+$backupStats = Get-VBRBackupSession |
+Where-Object {
+    $_.CreationTime -ge $since -and $_.JobType -eq "Backup"
+} |
+Group-Object JobName |
+ForEach-Object {
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
+
+    [PSCustomObject]@{
+        Type     = "Backup"
+        JobName  = $_.Name
+        Success  = $success
+        Warning  = $warning
+        Failed   = $failed
+        Total    = $total
+        Percent  = if ($total -gt 0) { [math]::Round(($success / $total) * 100,1) } else { 0 }
+    }
+}
+
+$bkPercent = if ($backupStats) { [math]::Round(($backupStats | Measure-Object Success -Sum).Sum / ($backupStats | Measure-Object Total -Sum).Sum * 100,1) } else { 0 }
+
+# =================================================
+# REPLICATION
+# =================================================
+$replicaStats = Get-VBRBackupSession |
+Where-Object {
+    $_.CreationTime -ge $since -and $_.JobType -eq "Replica"
+} |
+Group-Object JobName |
+ForEach-Object {
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
+
+    [PSCustomObject]@{
+        Type     = "Replica"
+        JobName  = $_.Name
+        Success  = $success
+        Warning  = $warning
+        Failed   = $failed
+        Total    = $total
+        Percent  = if ($total -gt 0) { [math]::Round(($success / $total) * 100,1) } else { 0 }
+    }
+}
+
+$rpPercent = if ($replicaStats) { [math]::Round(($replicaStats | Measure-Object Success -Sum).Sum / ($replicaStats | Measure-Object Total -Sum).Sum * 100,1) } else { 0 }
+
+# =================================================
+# TAPE BACKUP
+# =================================================
+$tapeSessions = Get-VBRTapeJob | ForEach-Object { Get-VBRTapeBackupSession -Job $_ } |
+Where-Object { $_.CreationTime -ge $since }
+
+$tapeStats = $tapeSessions |
+Group-Object JobName |
+ForEach-Object {
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
+
+    [PSCustomObject]@{
+        Type     = "Tape"
+        JobName  = $_.Name
+        Success  = $success
+        Warning  = $warning
+        Failed   = $failed
+        Total    = $total
+        Percent  = if ($total -gt 0) { [math]::Round(($success / $total) * 100,1) } else { 0 }
+    }
+}
+
+$tpPercent = if ($tapeStats) { [math]::Round(($tapeStats | Measure-Object Success -Sum).Sum / ($tapeStats | Measure-Object Total -Sum).Sum * 100,1) } else { 0 }
+
+# =================================================
+# REPOSITORIES
+# =================================================
+function Get-VBRRepoInfo {
+    [CmdletBinding()]
+    param ([PSObject[]]$Repository)
+    Begin { $outputAry=@() }
+    Process {
+        foreach ($r in $Repository) {
+            [Veeam.Backup.Core.CBackupRepositoryEx]::SyncSpaceInfoToDb($r, $true)
+            $rBackupsize = 0
+            $backups = Get-VBRBackup | Where-Object { $_.RepositoryId -eq $r.Id }
+            foreach ($b in $backups) { foreach ($s in $b.GetAllStorages()) { $rBackupsize += $s.Stats.BackupSize } }
+            $totalTB = [math]::Round($r.GetContainer().CachedTotalSpace.InBytes/1TB,2)
+            $freeTB  = [math]::Round($r.GetContainer().CachedFreeSpace.InBytes/1TB,2)
+            $usedPercent = if ($totalTB -gt 0) { [math]::Round((($totalTB-$freeTB)/$totalTB)*100,1) } else { 0 }
+            $outputAry += [PSCustomObject]@{
+                Name = $r.Name
+                TotalTB = $totalTB
+                FreeTB  = $freeTB
+                UsedPercent = $usedPercent
+                BackupSizeTB = [math]::Round($rBackupsize/1TB,2)
+            }
+        }
+    }
+    End { $outputAry }
+}
+
+$repoStats = Get-VBRBackupRepository | Get-VBRRepoInfo
+
+# =================================================
+# FONCTIONS GRAPHIQUES
+# =================================================
+function Get-Donut {
+param([double]$percent,[string]$label,[int]$threshold=80)
+$color = if ($percent -ge $threshold) { "#00B336" } else { "#E31E24" }
+$offset = 440 - (440 * $percent / 100)
+@"
+<svg width="160" height="160">
+ <circle cx="80" cy="80" r="70" stroke="#eee" stroke-width="15" fill="none"/>
+ <circle cx="80" cy="80" r="70" stroke="$color" stroke-width="15"
+  fill="none" stroke-dasharray="440" stroke-dashoffset="$offset"
+  transform="rotate(-90 80 80)"/>
+ <text x="50%" y="50%" text-anchor="middle" dy=".3em"
+  font-size="22" font-weight="bold">$label%</text>
+</svg>
+"@
+}
+
+function Get-Bar {
+param([double]$usedPercent)
+$color = if ($usedPercent -ge 70) { "#E31E24" } else { "#00B336" }
+$width  = [math]::Round(($usedPercent / 100) * 160)
+@"
+<svg width="160" height="20">
+ <rect width="160" height="20" fill='#eee' rx='5' ry='5'/>
+ <rect width="$width" height="20" fill="$color" rx='5' ry='5'/>
+ <text x='50%' y='14' text-anchor='middle' alignment-baseline='middle'
+       font-size='12' font-weight='bold' fill='#000'>$usedPercent`%</text>
+</svg>
+"@
+}
+
+# =================================================
+# HTML
+# =================================================
+$html = @"
+<html>
+<head>
+<title>Veeam Health Dashboard</title>
+<style>
+body { font-family:Segoe UI; background:#f4f6f8 }
+.container { display:flex; justify-content:center; gap:40px; flex-wrap:wrap }
+.card { background:#fff; padding:20px; border-radius:10px; box-shadow:0 0 10px rgba(0,0,0,0.1); text-align:center }
+table { width:90%; margin:auto; border-collapse:collapse }
+th,td { padding:10px; border-bottom:1px solid #ddd }
+th { background:#2c3e50; color:white }
+.green { color:#00B336; font-weight:bold }
+.red { color:#E31E24; font-weight:bold }
+</style>
+</head>
+<body>
+
+<h1 style='text-align:center'>Veeam Infrastructure Health</h1>
+
+<div class='container'>
+ <div class='card'>
+  <h3>Backup Success</h3>
+  $(Get-Donut $bkPercent $bkPercent 80)
+ </div>
+
+ <div class='card'>
+  <h3>Replication Success</h3>
+  $(Get-Donut $rpPercent $rpPercent 80)
+ </div>
+
+ <div class='card'>
+  <h3>Tape Backup Success</h3>
+  $(Get-Donut $tpPercent $tpPercent 80)
+ </div>
+</div>
+
+<h2 style='text-align:center;margin-top:40px'>Utilisation des Repositories</h2>
+<div class='container'>
+"@
+
+foreach ($r in $repoStats) {
+    $html += @"
+ <div class='card'>
+  <h4>$($r.Name)</h4>
+  $(Get-Bar $($r.UsedPercent))
+  <p>Libre : $($r.FreeTB) TB / $($r.TotalTB) TB</p>
+ </div>
+"@
+}
+
+$html += "</div>"
+
+# =================================================
+# TABLEAUX DETAIL
+# =================================================
+function Add-JobTable {
+param($title,$stats)
+$htmlContent = "<h2 style='text-align:center;margin-top:40px'>$title</h2><table><tr><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th></tr>"
+foreach ($j in $stats | Sort-Object Failed -Descending) {
+    $cls = if ($j.Percent -ge 80) { "green" } else { "red" }
+    $htmlContent += "<tr><td>$($j.JobName)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td></tr>"
+}
+$htmlContent += "</table>"
+$htmlContent
+}
+
+$html += Add-JobTable "Détails Backup (30 jours)" $backupStats
+$html += Add-JobTable "Détails Replication (30 jours)" $replicaStats
+$html += Add-JobTable "Détails Tape Backup (30 jours)" $tapeStats
+
+# =================================================
+# TABLEAU REPOSITORIES DETAIL
+# =================================================
+$html += "<h2 style='text-align:center;margin-top:40px'>Détails Repositories</h2><table><tr><th>Repository</th><th>Total TB</th><th>Libre TB</th><th>Utilisé TB</th><th>Used %</th></tr>"
+foreach ($r in $repoStats) {
+    $html += "<tr><td>$($r.Name)</td><td>$($r.TotalTB)</td><td>$($r.FreeTB)</td><td>$([math]::Round($r.TotalTB-$r.FreeTB,2))</td><td>$($r.UsedPercent)%</td></tr>"
+}
+$html += "</table>"
+
+# =================================================
+# EXPORT HTML
+# =================================================
+$html += "</body></html>"
+$html | Out-File $output -Encoding UTF8
+Write-Host "Dashboard généré : $output" -ForegroundColor Green
