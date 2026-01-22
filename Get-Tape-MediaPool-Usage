@@ -1,0 +1,37 @@
+# Get all tape media pools
+$mediaPools = Get-VBRTapeMediaPool
+
+# Prepare results
+$results = @()
+
+foreach ($pool in $mediaPools) {
+    # Get all tapes in this pool
+    $tapes = Get-VBRTapeMedium | Where-Object { $_.MediaPoolId -eq $pool.Id }
+
+    if (-not $tapes -or $tapes.Count -eq 0) {
+        $results += [PSCustomObject]@{
+            PoolName        = $pool.Name
+            TotalCapacityTB = 0
+            UsedCapacityTB  = 0
+            FreeCapacityTB  = 0
+            TapeCount       = 0
+        }
+        continue
+    }
+
+    # Calculate usage in TB (Capacity and Free are in bytes)
+    $totalCapacity = ($tapes | Measure-Object -Property Capacity -Sum).Sum / 1TB
+    $freeCapacity  = ($tapes | Measure-Object -Property Free -Sum).Sum / 1TB
+    $usedCapacity  = $totalCapacity - $freeCapacity
+
+    $results += [PSCustomObject]@{
+        PoolName        = $pool.Name
+        TotalCapacityTB = [math]::Round($totalCapacity, 2)
+        UsedCapacityTB  = [math]::Round($usedCapacity, 2)
+        FreeCapacityTB  = [math]::Round($freeCapacity, 2)
+        TapeCount       = $tapes.Count
+    }
+}
+
+# Display results
+$results | Sort-Object PoolName | Format-Table -AutoSize
