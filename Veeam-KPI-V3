@@ -1,0 +1,246 @@
+Add-PSSnapin VeeamPSSnapIn -ErrorAction SilentlyContinue
+
+# =================================================
+# PARAMÈTRES
+# =================================================
+$since  = (Get-Date).AddDays(-30)
+$output = "C:\Temp\Veeam_Health_Dashboard.html"
+
+# =================================================
+# BACKUP – VIA Get-VBRBackupSession (INCHANGÉ)
+# =================================================
+$backupStats = Get-VBRBackupSession |
+Where-Object {
+    $_.CreationTime -ge $since -and $_.JobType -eq "Backup"
+} |
+Group-Object JobName |
+ForEach-Object {
+
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
+
+    [PSCustomObject]@{
+        Type     = $_.JobType
+        JobName  = $_.Name
+        Success  = $success
+        Warning  = $warning
+        Failed   = $failed
+        Total    = $total
+        Percent  = if ($total -gt 0) {
+            [math]::Round(($success / $total) * 100,1)
+        } else { 0 }
+    }
+}
+
+$bkSuccess = ($backupStats | Measure-Object Success -Sum).Sum
+$bkFailed  = ($backupStats | Measure-Object Failed  -Sum).Sum
+$bkWarning = ($backupStats | Measure-Object Warning -Sum).Sum
+$bkTotal   = $bkSuccess + $bkFailed + $bkWarning
+$bkPercent = if ($bkTotal -gt 0) {
+    [math]::Round(($bkSuccess / $bkTotal) * 100,1)
+} else { 0 }
+
+# =================================================
+# REPLICATION – VIA Get-VBRBackupSession (INCHANGÉ)
+# =================================================
+$replicaStats = Get-VBRBackupSession |
+Where-Object {
+    $_.CreationTime -ge $since -and $_.JobType -eq "Replica"
+} |
+Group-Object JobName |
+ForEach-Object {
+
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
+
+    [PSCustomObject]@{
+        Type     = $_.JobType
+        JobName  = $_.Name
+        Success  = $success
+        Warning  = $warning
+        Failed   = $failed
+        Total    = $total
+        Percent  = if ($total -gt 0) {
+            [math]::Round(($success / $total) * 100,1)
+        } else { 0 }
+    }
+}
+
+$rpSuccess = ($replicaStats | Measure-Object Success -Sum).Sum
+$rpFailed  = ($replicaStats | Measure-Object Failed  -Sum).Sum
+$rpWarning = ($replicaStats | Measure-Object Warning -Sum).Sum
+$rpTotal   = $rpSuccess + $rpFailed + $rpWarning
+$rpPercent = if ($rpTotal -gt 0) {
+    [math]::Round(($rpSuccess / $rpTotal) * 100,1)
+} else { 0 }
+
+# =================================================
+# FONCTION DONUT SVG (INCHANGÉE)
+# =================================================
+function Get-Donut {
+param($percent,$label)
+
+$color = if ($percent -ge 80) { "#00B336" } else { "#E31E24" }
+$offset = 440 - (440 * $percent / 100)
+
+@"
+<svg width="160" height="160">
+ <circle cx="80" cy="80" r="70" stroke="#eee" stroke-width="15" fill="none"/>
+ <circle cx="80" cy="80" r="70" stroke="$color" stroke-width="15"
+  fill="none" stroke-dasharray="440" stroke-dashoffset="$offset"
+  transform="rotate(-90 80 80)"/>
+ <text x="50%" y="50%" text-anchor="middle" dy=".3em"
+  font-size="22" font-weight="bold">$label%</text>
+</svg>
+"@
+}
+
+# =================================================
+# FONCTION REPO INFO (INCHANGÉE)
+# =================================================
+Function Get-VBRRepoInfo {
+    [CmdletBinding()]
+    param (
+        [Parameter(Position=0, ValueFromPipeline=$true)]
+        [PSObject[]]$Repository
+    )
+    Begin {
+        Function Build-Object {
+            param($name,$repohost,$path,$free,$total,$rtype,$rBackupsize)
+
+            [PSCustomObject]@{
+                Target          = $name
+                RepoHost        = $repohost
+                StorePath       = $path
+                StorageFreeTB   = [Math]::Round($free / 1TB, 2)
+                StorageTotalTB  = [Math]::Round($total / 1TB, 2)
+                FreePercentage  = if ($total -gt 0) { [Math]::Round(($free / $total) * 100, 2) } else { 0 }
+                StorageBackupTB = [Math]::Round($rBackupsize / 1TB, 2)
+                rType           = $rtype
+            }
+        }
+    }
+    Process {
+        foreach ($r in $Repository) {
+
+            [Veeam.Backup.Core.CBackupRepositoryEx]::SyncSpaceInfoToDb($r, $true)
+
+            $rBackupsize = 0
+            Get-VBRBackup | Where-Object { $_.RepositoryId -eq $r.Id } |
+            ForEach-Object {
+                $_.GetAllStorages() | ForEach-Object {
+                    $rBackupsize += $_.Stats.BackupSize
+                }
+            }
+
+            Build-Object `
+                $r.Name `
+                $($r.GetHost()).Name `
+                $r.Path `
+                $r.GetContainer().CachedFreeSpace.InBytes `
+                $r.GetContainer().CachedTotalSpace.InBytes `
+                $r.Type `
+                $rBackupsize
+        }
+    }
+}
+
+# =================================================
+# KPI REPOSITORY – DONNÉES
+# =================================================
+$repoStats = Get-VBRBackupRepository | Get-VBRRepoInfo
+
+# =================================================
+# FONCTION BAR KPI
+# =================================================
+function Get-Bar {
+param($percent)
+
+$color = if ($percent -ge 20) { "#00B336" } else { "#E31E24" }
+
+@"
+<div style="background:#eee;border-radius:6px;width:200px;height:18px">
+ <div style="background:$color;width:$percent%;height:18px;border-radius:6px"></div>
+</div>
+<span style="font-weight:bold">$percent%</span>
+"@
+}
+
+# =================================================
+# HTML
+# =================================================
+$html = @"
+<html>
+<head>
+<title>Veeam Health Dashboard</title>
+<style>
+body { font-family:Segoe UI; background:#f4f6f8 }
+.container { display:flex; justify-content:center; gap:40px; flex-wrap:wrap }
+.card { background:#fff; padding:20px; border-radius:10px;
+        box-shadow:0 0 10px rgba(0,0,0,0.1); text-align:center }
+table { width:90%; margin:auto; border-collapse:collapse }
+th,td { padding:10px; border-bottom:1px solid #ddd }
+th { background:#2c3e50; color:white }
+.green { color:#00B336; font-weight:bold }
+.red { color:#E31E24; font-weight:bold }
+</style>
+</head>
+<body>
+
+<h1 style="text-align:center">Veeam Infrastructure Health</h1>
+
+<div class="container">
+ <div class="card">
+  <h3>Backup Success</h3>
+  $(Get-Donut $bkPercent $bkPercent)
+ </div>
+ <div class="card">
+  <h3>Replication Success</h3>
+  $(Get-Donut $rpPercent $rpPercent)
+ </div>
+</div>
+
+<h2 style="text-align:center;margin-top:40px">Utilisation des Repositories</h2>
+<div class="container">
+"@
+
+foreach ($r in $repoStats) {
+    $html += @"
+ <div class="card">
+  <h4>$($r.Target)</h4>
+  $(Get-Bar $($r.FreePercentage))
+  <p>Libre : $($r.StorageFreeTB) TB / $($r.StorageTotalTB) TB</p>
+ </div>
+"@
+}
+
+$html += @"
+</div>
+
+<h2 style="text-align:center;margin-top:40px">Détails Repositories</h2>
+<table>
+<tr>
+<th>Repository</th><th>Host</th><th>Path</th>
+<th>Free TB</th><th>Total TB</th><th>Free %</th>
+<th>Backup TB</th><th>Type</th>
+</tr>
+"@
+
+foreach ($r in $repoStats) {
+    $cls = if ($r.FreePercentage -ge 20) { "green" } else { "red" }
+    $html += "<tr>
+<td>$($r.Target)</td><td>$($r.RepoHost)</td><td>$($r.StorePath)</td>
+<td>$($r.StorageFreeTB)</td><td>$($r.StorageTotalTB)</td>
+<td class='$cls'>$($r.FreePercentage)%</td>
+<td>$($r.StorageBackupTB)</td><td>$($r.rType)</td>
+</tr>"
+}
+
+$html += "</table></body></html>"
+
+$html | Out-File $output -Encoding UTF8
+Write-Host "Dashboard généré : $output" -ForegroundColor Green
