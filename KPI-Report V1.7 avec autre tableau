@@ -1,0 +1,131 @@
+# =================================================
+# PARAMÈTRES
+# =================================================
+$since  = (Get-Date).AddDays(-30)
+$output = "C:\Temp\Veeam_Health_Dashboard.html"
+
+# =================================================
+# FONCTIONS ET KPI (idem script précédent)
+# =================================================
+# ... [Toutes les fonctions et sections du script précédent restent inchangées]
+
+# =================================================
+# HTML DE BASE (KPI et Repositories)
+# =================================================
+$html = @"
+<html>
+<head>
+<title>Veeam Health Dashboard</title>
+<style>
+body { font-family:Segoe UI; background:#f4f6f8 }
+.container { display:flex; justify-content:center; gap:40px; flex-wrap:wrap }
+.card { background:#fff; padding:20px; border-radius:10px;
+        box-shadow:0 0 10px rgba(0,0,0,0.1); text-align:center; margin-bottom:20px }
+table { width:90%; margin:auto; border-collapse:collapse; margin-top:20px }
+th,td { padding:10px; border-bottom:1px solid #ddd }
+th { background:#2c3e50; color:white }
+.green { color:#00B336; font-weight:bold }
+.red { color:#E31E24; font-weight:bold }
+</style>
+</head>
+<body>
+
+<h1 style="text-align:center">Veeam Infrastructure Health</h1>
+
+<div class="container">
+ <div class="card">
+  <h3>Backup Success</h3>
+  $(Get-Donut $bkPercent $bkPercent)
+ </div>
+
+ <div class="card">
+  <h3>Replication Success</h3>
+  $(Get-Donut $rpPercent $rpPercent)
+ </div>
+
+ <div class="card">
+  <h3>Tape Backup Success</h3>
+  $(Get-Donut $tpPercent $tpPercent)
+ </div>
+</div>
+
+<h2 style="text-align:center;margin-top:40px">Utilisation des Repositories</h2>
+<div class="container">
+"@
+
+foreach ($r in $repoStats) {
+    $html += @"
+ <div class='card'>
+  <h4>$($r.Target)</h4>
+  $(Get-RepoDonut $($r.UsedPercent) $($r.Target))
+  <p>Libre : $($r.StorageFreeTB) TB / $($r.StorageTotalTB) TB</p>
+ </div>
+"@
+}
+
+$html += "</div>"
+
+# =================================================
+# TABLEAUX DÉTAILLÉS
+# =================================================
+function Append-Table {
+param($stats,$title)
+$html += "<h2 style='text-align:center;margin-top:40px'>$title</h2><table><tr><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th></tr>"
+foreach ($j in $stats | Sort-Object Failed -Descending) {
+    $cls = if ($j.Percent -ge 80) { "green" } else { "red" }
+    $html += "<tr><td>$($j.JobName)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td></tr>"
+}
+$html += "</table>"
+}
+
+Append-Table $backupStats "Détails Backup (30 jours)"
+Append-Table $replicaStats "Détails Replication (30 jours)"
+Append-Table $tapeStats "Détails Tape Backup (30 jours)"
+
+# =================================================
+# TABLEAU DÉTAILLÉ REPOS
+# =================================================
+$html += "<h2 style='text-align:center;margin-top:40px'>Détails Repositories</h2>
+<table>
+<tr><th>Repository</th><th>Host</th><th>Path</th><th>Total TB</th><th>Free TB</th><th>Used %</th><th>BackupSize TB</th><th>Type</th></tr>"
+foreach ($r in $repoStats) {
+    $html += "<tr><td>$($r.Target)</td><td>$($r.RepoHost)</td><td>$($r.StorePath)</td><td>$($r.StorageTotalTB)</td><td>$($r.StorageFreeTB)</td><td>$($r.UsedPercent)%</td><td>$($r.StorageBackupTB)</td><td>$($r.rType)</td></tr>"
+}
+$html += "</table>"
+
+# =================================================
+# TABLEAU DÉTAILLÉ JOBS (Backup, Replica, Tape) – NOUVEAU
+# =================================================
+$html += "<h2 style='text-align:center;margin-top:40px'>Tableau détaillé Jobs Backup</h2>
+<table>
+<tr><th>Type</th><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th></tr>"
+foreach ($j in $backupStats) {
+    $cls = if ($j.Percent -ge 80) { "green" } else { "red" }
+    $html += "<tr><td>$($j.Type)</td><td>$($j.JobName)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td></tr>"
+}
+$html += "</table>"
+
+$html += "<h2 style='text-align:center;margin-top:40px'>Tableau détaillé Jobs Replication</h2>
+<table>
+<tr><th>Type</th><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th></tr>"
+foreach ($j in $replicaStats) {
+    $cls = if ($j.Percent -ge 80) { "green" } else { "red" }
+    $html += "<tr><td>$($j.Type)</td><td>$($j.JobName)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td></tr>"
+}
+$html += "</table>"
+
+$html += "<h2 style='text-align:center;margin-top:40px'>Tableau détaillé Jobs Tape Backup</h2>
+<table>
+<tr><th>Type</th><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th></tr>"
+foreach ($j in $tapeStats) {
+    $cls = if ($j.Percent -ge 80) { "green" } else { "red" }
+    $html += "<tr><td>$($j.Type)</td><td>$($j.JobName)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td></tr>"
+}
+$html += "</table>"
+
+# =================================================
+# EXPORT HTML
+# =================================================
+$html += "</body></html>"
+$html | Out-File $output -Encoding UTF8
+Write-Host "Dashboard généré : $output" -ForegroundColor Green
