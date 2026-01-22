@@ -1,0 +1,74 @@
+Function Get-VBRRepoInfo {
+    [CmdletBinding()]
+    param (
+        [Parameter(Position=0, ValueFromPipeline=$true)]
+        [PSObject[]]$Repository
+    )
+    Begin {
+        $outputAry = @()
+
+        Function Build-Object {
+            param(
+                $name, $repohost, $path, $free, $total, $rtype, $rBackupsize
+            )
+
+            # Convert to TB
+            $freeTB   = [Math]::Round([Decimal]$free / 1TB, 2)
+            $totalTB  = [Math]::Round([Decimal]$total / 1TB, 2)
+            $backupTB = [Math]::Round([Decimal]$rBackupsize / 1TB, 2)
+
+            $repoObj = [PSCustomObject]@{
+                Target          = $name
+                RepoHost        = $repohost
+                StorePath       = $path
+                StorageFreeTB   = $freeTB
+                StorageTotalTB  = $totalTB
+                FreePercentage  = if ($total -gt 0) { [Math]::Round(($free / $total) * 100, 2) } else { 0 }
+                StorageBackupTB = $backupTB
+                rType           = $rtype
+            }
+            return $repoObj
+        }
+    }
+    Process {
+        foreach ($r in $Repository) {
+            # Refresh Repository Size Info
+            [Veeam.Backup.Core.CBackupRepositoryEx]::SyncSpaceInfoToDb($r, $true)
+
+            $rType = switch ($r.Type) {
+                "WinLocal"      { "Windows Local" }
+                "LinuxLocal"    { "Linux Local" }
+                "LinuxHardened" { "Hardened" }
+                "CifsShare"     { "CIFS Share" }
+                "DataDomain"    { "Data Domain" }
+                "ExaGrid"       { "ExaGrid" }
+                "HPStoreOnce"   { "HP StoreOnce" }
+                "Nfs"           { "NFS Direct" }
+                default         { "Unknown" }
+            }
+
+            # Calculate total backup size in this repository
+            $rBackupsize = 0
+            $backups = Get-VBRBackup | Where-Object { $_.RepositoryId -eq $r.Id }
+            foreach ($b in $backups) {
+                foreach ($storage in $b.GetAllStorages()) {
+                    $rBackupsize += $storage.Stats.BackupSize
+                }
+            }
+
+            $outputObj = Build-Object `
+                $r.Name `
+                $($r.GetHost()).Name.ToLower() `
+                $r.Path `
+                $r.GetContainer().CachedFreeSpace.InBytes `
+                $r.GetContainer().CachedTotalSpace.InBytes `
+                $rType `
+                $rBackupsize
+
+            $outputAry += $outputObj
+        }
+    }
+    End {
+        $outputAry
+    }
+}
