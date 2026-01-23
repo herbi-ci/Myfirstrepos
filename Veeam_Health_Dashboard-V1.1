@@ -10,33 +10,37 @@ $output = "C:\Temp\Veeam_Health_Dashboard.html"
 Function Get-VBRRepoInfo {
     [CmdletBinding()]
     param (
-        [Parameter(ValueFromPipeline=$true)]
+        [Parameter(Position=0, ValueFromPipeline=$true)]
         [PSObject[]]$Repository
     )
     Begin {
         $outputAry = @()
         Function Build-Object {
             param($name,$repohost,$path,$free,$total,$rtype,$rBackupsize)
+
             [PSCustomObject]@{
                 Target          = $name
                 RepoHost        = $repohost
                 StorePath       = $path
-                StorageFreeTB   = [math]::Round($free/1TB,2)
-                StorageTotalTB  = [math]::Round($total/1TB,2)
-                FreePercentage  = if ($total -gt 0) { [math]::Round(($free/$total)*100,2) } else { 0 }
-                StorageBackupTB = [math]::Round($rBackupsize/1TB,2)
+                StorageFreeTB   = [Math]::Round($free / 1TB, 2)
+                StorageTotalTB  = [Math]::Round($total / 1TB, 2)
+                FreePercentage  = if ($total -gt 0) { [Math]::Round(($free / $total) * 100, 2) } else { 0 }
+                StorageBackupTB = [Math]::Round($rBackupsize / 1TB, 2)
                 rType           = $rtype
             }
         }
     }
     Process {
         foreach ($r in $Repository) {
-            [Veeam.Backup.Core.CBackupRepositoryEx]::SyncSpaceInfoToDb($r,$true)
+            [Veeam.Backup.Core.CBackupRepositoryEx]::SyncSpaceInfoToDb($r, $true)
+
             $rBackupsize = 0
-            Get-VBRBackup | Where-Object RepositoryId -eq $r.Id |
-            ForEach-Object {
-                $_.GetAllStorages() | ForEach-Object { $rBackupsize += $_.Stats.BackupSize }
+            Get-VBRBackup | Where-Object { $_.RepositoryId -eq $r.Id } | ForEach-Object {
+                $_.GetAllStorages() | ForEach-Object {
+                    $rBackupsize += $_.Stats.BackupSize
+                }
             }
+
             $outputAry += Build-Object `
                 $r.Name `
                 $($r.GetHost()).Name `
@@ -51,7 +55,7 @@ Function Get-VBRRepoInfo {
 }
 
 # =================================================
-# GRAPHIQUES
+# FONCTIONS SVG
 # =================================================
 function Get-Donut {
 param($percent,$label)
@@ -72,150 +76,147 @@ $offset = 440 - (440 * $percent / 100)
 function Get-Bar {
 param([double]$usedPercent)
 $color = if ($usedPercent -ge 70) { "#E31E24" } else { "#00B336" }
-$width = [math]::Round(($usedPercent/100)*160)
+$width = [math]::Round(($usedPercent / 100) * 160)
 @"
 <svg width="160" height="20">
- <rect width="160" height="20" fill="#eee" rx="5"/>
- <rect width="$width" height="20" fill="$color" rx="5"/>
- <text x="50%" y="14" text-anchor="middle"
-       font-size="12" font-weight="bold">$usedPercent%</text>
+ <rect width="160" height="20" fill='#eee' rx='5' ry='5'/>
+ <rect width="$width" height="20" fill="$color" rx='5' ry='5'/>
+ <text x='50%' y='14' text-anchor='middle'
+       font-size='12' font-weight='bold'>$usedPercent%</text>
 </svg>
 "@
 }
 
 # =================================================
-# BACKUP KPI
+# BACKUP
 # =================================================
 $backupStats = Get-VBRBackupSession |
 Where-Object { $_.CreationTime -ge $since -and $_.JobType -eq "Backup"} |
-Group-Object JobName |
-ForEach-Object {
-    $s = ($_.Group | Where-Object Result -eq "Success").Count
-    $f = ($_.Group | Where-Object Result -eq "Failed").Count
-    $w = ($_.Group | Where-Object Result -eq "Warning").Count
-    $t = $_.Count
+Group-Object JobName | ForEach-Object {
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
     [PSCustomObject]@{
-        Type="Backup"; JobName=$_.Name; Success=$s; Warning=$w; Failed=$f
-        Percent = if ($t -gt 0) { [math]::Round(($s/$t)*100,1) } else { 0 }
+        Type="Backup"; JobName=$_.Name; Success=$success; Warning=$warning; Failed=$failed
+        Percent = if ($total) { [math]::Round(($success/$total)*100,1) } else { 0 }
     }
 }
-$bkPercent = [math]::Round((($backupStats | Measure-Object Success -Sum).Sum /
-                            ($backupStats | Measure-Object -Property Percent -Count).Count)*1,1)
+$bkPercent = [math]::Round((($backupStats | Measure-Object Success -Sum).Sum / ($backupStats.Count)) * 100,1)
 
 # =================================================
-# REPLICATION KPI
+# REPLICATION
 # =================================================
 $replicaStats = Get-VBRBackupSession |
 Where-Object { $_.CreationTime -ge $since -and $_.JobType -eq "Replica"} |
-Group-Object JobName |
-ForEach-Object {
-    $s = ($_.Group | Where-Object Result -eq "Success").Count
-    $f = ($_.Group | Where-Object Result -eq "Failed").Count
-    $w = ($_.Group | Where-Object Result -eq "Warning").Count
-    $t = $_.Count
+Group-Object JobName | ForEach-Object {
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
     [PSCustomObject]@{
-        Type="Replica"; JobName=$_.Name; Success=$s; Warning=$w; Failed=$f
-        Percent = if ($t -gt 0) { [math]::Round(($s/$t)*100,1) } else { 0 }
+        Type="Replica"; JobName=$_.Name; Success=$success; Warning=$warning; Failed=$failed
+        Percent = if ($total) { [math]::Round(($success/$total)*100,1) } else { 0 }
     }
 }
-$rpPercent = [math]::Round((($replicaStats | Measure-Object Success -Sum).Sum /
-                            ($replicaStats | Measure-Object -Property Percent -Count).Count)*1,1)
+$rpPercent = [math]::Round((($replicaStats | Measure-Object Success -Sum).Sum / ($replicaStats.Count)) * 100,1)
 
 # =================================================
-# TAPE BACKUP KPI
+# TAPE BACKUP
 # =================================================
 $tapeStats = Get-VBRTapeJob | ForEach-Object { Get-VBRTapeBackupSession -Job $_ } |
-Where-Object CreationTime -ge $since |
-Group-Object Name |
-ForEach-Object {
-    $s = ($_.Group | Where-Object Result -eq "Success").Count
-    $f = ($_.Group | Where-Object Result -eq "Failed").Count
-    $w = ($_.Group | Where-Object Result -eq "Warning").Count
-    $t = $_.Count
+Where-Object { $_.CreationTime -ge $since } |
+Group-Object Name | ForEach-Object {
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
     [PSCustomObject]@{
-        Type="Tape"; JobName=$_.Name; Success=$s; Warning=$w; Failed=$f
-        Percent = if ($t -gt 0) { [math]::Round(($s/$t)*100,1) } else { 0 }
+        Type="Tape"; JobName=$_.Name; Success=$success; Warning=$warning; Failed=$failed
+        Percent = if ($total) { [math]::Round(($success/$total)*100,1) } else { 0 }
     }
 }
-$tpPercent = [math]::Round((($tapeStats | Measure-Object Success -Sum).Sum /
-                            ($tapeStats | Measure-Object -Property Percent -Count).Count)*1,1)
+$tpPercent = [math]::Round((($tapeStats | Measure-Object Success -Sum).Sum / ($tapeStats.Count)) * 100,1)
 
 # =================================================
 # REPOSITORIES
 # =================================================
 $repoStats = Get-VBRBackupRepository | Get-VBRRepoInfo
-foreach ($r in $repoStats) {
-    $r | Add-Member UsedPercent ([math]::Round(100-$r.FreePercentage,2))
+$repoStats | ForEach-Object {
+    $_ | Add-Member UsedPercent ([math]::Round(100 - $_.FreePercentage,2))
 }
 
 # =================================================
-# TAPE MEDIA POOL – UTILISATION
+# TAPE MEDIA POOLS (AJOUT)
 # =================================================
-$tapePoolStats = foreach ($pool in Get-VBRTapeMediaPool) {
+$tapePoolStats = @()
+Get-VBRTapeMediaPool | ForEach-Object {
     $tapes = Get-VBRTapeMedium | Where-Object {
-        $_.MediaPoolId -eq $pool.Id -and $_.Location -match 'Slot'
+        $_.MediaPoolId -eq $_.Id -and $_.Location -match 'Slot'
     }
-    if ($tapes.Count -eq 0) { continue }
+    if ($tapes.Count -eq 0) { return }
+
     $total = ($tapes | Measure-Object Capacity -Sum).Sum
     $free  = ($tapes | Measure-Object Free -Sum).Sum
-    [PSCustomObject]@{
-        PoolName    = $pool.Name
-        UsedPercent = [math]::Round((($total-$free)/$total)*100,2)
+
+    $tapePoolStats += [PSCustomObject]@{
+        PoolName        = $_.Name
+        TotalCapacityTB = [math]::Round($total/1TB,2)
+        UsedCapacityTB  = [math]::Round(($total-$free)/1TB,2)
+        FreeCapacityTB  = [math]::Round($free/1TB,2)
+        UsedPercent     = [math]::Round((($total-$free)/$total)*100,2)
+        OnlineCount     = $tapes.Count
     }
 }
 
 # =================================================
-# BANDES EXPIRÉES
+# BANDES EXPIRÉES (AJOUT)
 # =================================================
-$expiredTapes = Get-VBRTapeMedium | Where-Object IsExpired -eq $true
+$expiredTapes = Get-VBRTapeMedium | Where-Object IsExpired
 
 # =================================================
 # HTML
 # =================================================
 $html = @"
-<html><head>
-<style>
-body { font-family:Segoe UI; background:#f4f6f8 }
-.container { display:flex; gap:40px; flex-wrap:wrap; justify-content:center }
-.card { background:#fff; padding:20px; border-radius:10px;
-box-shadow:0 0 10px rgba(0,0,0,0.1); text-align:center }
-table { width:90%; margin:auto; border-collapse:collapse }
-th,td { padding:10px; border-bottom:1px solid #ddd }
-th { background:#2c3e50; color:white }
-</style>
-</head><body>
+<html><head><style>
+body{font-family:Segoe UI;background:#f4f6f8}
+.container{display:flex;gap:40px;justify-content:center;flex-wrap:wrap}
+.card{background:#fff;padding:20px;border-radius:10px;box-shadow:0 0 10px rgba(0,0,0,.1);text-align:center}
+table{width:90%;margin:auto;border-collapse:collapse}
+th,td{padding:10px;border-bottom:1px solid #ddd}
+th{background:#2c3e50;color:#fff}
+.green{color:#00B336;font-weight:bold}
+.red{color:#E31E24;font-weight:bold}
+</style></head><body>
 
-<h1 style="text-align:center">Veeam Infrastructure Health</h1>
+<h1 style='text-align:center'>Veeam Infrastructure Health</h1>
 
-<div class="container">
-<div class="card"><h3>Backup</h3>$(Get-Donut $bkPercent $bkPercent)</div>
-<div class="card"><h3>Replication</h3>$(Get-Donut $rpPercent $rpPercent)</div>
-<div class="card"><h3>Tape Backup</h3>$(Get-Donut $tpPercent $tpPercent)</div>
+<div class='container'>
+<div class='card'><h3>Backup</h3>$(Get-Donut $bkPercent $bkPercent)</div>
+<div class='card'><h3>Replication</h3>$(Get-Donut $rpPercent $rpPercent)</div>
+<div class='card'><h3>Tape</h3>$(Get-Donut $tpPercent $tpPercent)</div>
 </div>
 
-<h2 style="text-align:center;margin-top:40px">Utilisation des Repositories</h2>
-<div class="container">
-$(
-$repoStats | ForEach-Object {
-"<div class='card'><h4>$($_.Target)</h4>$(Get-Bar $_.UsedPercent)</div>"
-})
+<h2 style='text-align:center;margin-top:40px'>Utilisation des Repositories</h2>
+<div class='container'>
+$($repoStats | ForEach-Object { "<div class='card'><h4>$($_.Target)</h4>$(Get-Bar $_.UsedPercent)</div>" })
 </div>
 
-<h2 style="text-align:center;margin-top:40px">Utilisation des Tape Media Pools</h2>
-<div class="container">
-$(
-$tapePoolStats | ForEach-Object {
-"<div class='card'><h4>$($_.PoolName)</h4>$(Get-Bar $_.UsedPercent)</div>"
-})
+<h2 style='text-align:center;margin-top:40px'>Utilisation des Tape Media Pools</h2>
+<div class='container'>
+$($tapePoolStats | ForEach-Object { "<div class='card'><h4>$($_.PoolName)</h4>$(Get-Bar $_.UsedPercent)</div>" })
 </div>
 
-<h2 style="text-align:center;margin-top:40px">Bandes Expirées</h2>
+<h2 style='text-align:center;margin-top:40px'>Détails Tape Media Pools</h2>
 <table>
-<tr><th>Nom</th><th>Barcode</th><th>Media Pool</th><th>Location</th><th>Expiration</th></tr>
-$(
-$expiredTapes | ForEach-Object {
-"<tr><td>$($_.Name)</td><td>$($_.Barcode)</td><td>$($_.MediaPoolName)</td><td>$($_.Location)</td><td>$($_.ExpirationDate)</td></tr>"
-})
+<tr><th>Pool</th><th>Total TB</th><th>Used TB</th><th>Free TB</th><th>Used %</th><th>Online</th></tr>
+$($tapePoolStats | ForEach-Object { "<tr><td>$($_.PoolName)</td><td>$($_.TotalCapacityTB)</td><td>$($_.UsedCapacityTB)</td><td>$($_.FreeCapacityTB)</td><td>$($_.UsedPercent)%</td><td>$($_.OnlineCount)</td></tr>" })
+</table>
+
+<h2 style='text-align:center;margin-top:40px'>Bandes Expirées</h2>
+<table>
+<tr><th>Nom</th><th>Barcode</th><th>Pool</th><th>Location</th></tr>
+$($expiredTapes | ForEach-Object { "<tr><td>$($_.Name)</td><td>$($_.Barcode)</td><td>$($_.MediaPoolName)</td><td>$($_.Location)</td></tr>" })
 </table>
 
 </body></html>
