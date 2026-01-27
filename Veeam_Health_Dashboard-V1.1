@@ -122,6 +122,7 @@ $width  = [math]::Round(($usedPercent / 100) * 160)
 # =================================================
 # BACKUP
 # =================================================
+##### On calcul les stats de chaque Job
 $backupStats = Get-VBRBackupSession |
 Where-Object { $_.CreationTime -ge $since -and $_.JobType -eq "Backup"} |
 Group-Object JobName |
@@ -137,19 +138,23 @@ ForEach-Object {
         Warning  = $warning
         Failed   = $failed
         Total    = $total
-        Percent  = if ($total -gt 0) { [math]::Round(($success / $total) * 100,1) } else { 0 }
+        Percent  = if ($total -gt 0) { [math]::Round((($success + $warning) / $total) * 100,1) } else { 0 }
     }
 }
+
+##### On calcul le porcetange global pour générer le graphe
 
 $bkSuccess = ($backupStats | Measure-Object Success -Sum).Sum
 $bkFailed  = ($backupStats | Measure-Object Failed  -Sum).Sum
 $bkWarning = ($backupStats | Measure-Object Warning -Sum).Sum
 $bkTotal   = $bkSuccess + $bkFailed + $bkWarning
-$bkPercent = if ($bkTotal -gt 0) { [math]::Round(($bkSuccess / $bkTotal) * 100,1) } else { 0 }
+$bkPercent = if ($bkTotal -gt 0) { [math]::Round((($bkSuccess + $bkWarning) / $bkTotal) * 100,1) } else { 0 }
 
 # =================================================
 # REPLICATION
 # =================================================
+
+##### On calcul les stats de chaque Job
 $replicaStats = Get-VBRBackupSession |
 Where-Object { $_.CreationTime -ge $since -and $_.JobType -eq "Replica"} |
 Group-Object JobName |
@@ -165,19 +170,22 @@ ForEach-Object {
         Warning  = $warning
         Failed   = $failed
         Total    = $total
-        Percent  = if ($total -gt 0) { [math]::Round(($success / $total) * 100,1) } else { 0 }
+        Percent  = if ($total -gt 0) { [math]::Round((($success + $warning) / $total) * 100,1) } else { 0 }
     }
 }
+
+##### On calcul le porcetange global pour générer le graphe
 
 $rpSuccess = ($replicaStats | Measure-Object Success -Sum).Sum
 $rpFailed  = ($replicaStats | Measure-Object Failed  -Sum).Sum
 $rpWarning = ($replicaStats | Measure-Object Warning -Sum).Sum
 $rpTotal   = $rpSuccess + $rpFailed + $rpWarning
-$rpPercent = if ($rpTotal -gt 0) { [math]::Round(($rpSuccess / $rpTotal) * 100,1) } else { 0 }
+$rpPercent = if ($rpTotal -gt 0) { [math]::Round((($rpSuccess + $rpWarning) / $rpTotal) * 100,1) } else { 0 }
 
 # =================================================
 # TAPE BACKUP
 # =================================================
+##### On calcul les stats de chaque Job
 $tapeSessions = Get-VBRTapeJob | ForEach-Object { Get-VBRTapeBackupSession -Job $_ } |
 Where-Object { $_.CreationTime -ge $since }
 
@@ -195,15 +203,17 @@ ForEach-Object {
         Warning  = $warning
         Failed   = $failed
         Total    = $total
-        Percent  = if ($total -gt 0) { [math]::Round(($success / $total) * 100,1) } else { 0 }
+        Percent  = if ($total -gt 0) { [math]::Round((($success + $warning) / $total) * 100,1) } else { 0 }
     }
 }
+
+##### On calcul le porcetange global pour générer le graphe
 
 $tpSuccess = ($tapeStats | Measure-Object Success -Sum).Sum
 $tpFailed  = ($tapeStats | Measure-Object Failed  -Sum).Sum
 $tpWarning = ($tapeStats | Measure-Object Warning -Sum).Sum
 $tpTotal   = $tpSuccess + $tpFailed + $tpWarning
-$tpPercent = if ($tpTotal -gt 0) { [math]::Round(($tpSuccess / $tpTotal) * 100,1) } else { 0 }
+$tpPercent = if ($tpTotal -gt 0) { [math]::Round((($tpSuccess + $tpWarning) / $tpTotal) * 100,1) } else { 0 }
 
 # =================================================
 # REPOSITORIES
@@ -320,7 +330,7 @@ $html+= @"
 <div class="container">
 "@
 
-
+$results = $results | Where-Object { $_.PoolName -notlike 'Imported' -and $_.PoolName -notlike 'Free' -and $_.PoolName -notlike 'Retired' -and $_.PoolName -notlike 'Unrecognized' }
 
 foreach ($r in $results) {
     $html += @"
@@ -364,10 +374,10 @@ $html += "</table>"
 # Tableau détaillé Tape Media Pool
 $html += "<h2 style='text-align:center;margin-top:40px'>Détails Tape Media Pool</h2>
 <table>
-<tr><th>Pool Name</th>><th>Total TB</th><th>Free TB</th><th>Used TB</th><th>Used %</th></tr>"
+<tr><th>Pool Name</th><th>Total TB</th><th>Free TB</th><th>Used TB</th><th>Used %</th></tr>"
 foreach ($r in $results) {
     $cls = if ($r.UsedPercentage -ge 70) { "red" } else { "green" }
-    $html += "<tr><td>$($r.PoolName)</td><td>$($r.TotalCapacityTB)</td><td>$($r.FreeCapacityTB)</td><td>$($r.UsedCapacityTB)</td><td>$($r.UsedPercentage)%</td></tr>"
+    $html += "<tr><td>$($r.PoolName)</td><td>$($r.TotalCapacityTB)</td><td>$($r.FreeCapacityTB)</td><td>$($r.UsedCapacityTB)</td><td class='$cls'>$($r.UsedPercentage)%</td></tr>"
 }
 $html += "</table>"
 
