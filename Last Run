@@ -1,0 +1,13 @@
+LastRun = ($_.Group | Sort-Object CreationTime -Descending | Select-Object -First 1).CreationTime
+
+
+[PSCustomObject]@{
+    Type     = "Backup"
+    JobName  = $_.Name
+    Success  = $success
+    Warning  = $warning
+    Failed   = $failed
+    Total    = $total
+    Percent  = if ($total -gt 0) { [math]::Round(($success / $total) * 100,1) } else { 0 }
+    LastRun  = ($_.Group | Sort-Object CreationTime -Descending | Select-Object -First 1).CreationTime
+}
