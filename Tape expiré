@@ -1,0 +1,39 @@
+# =================================================
+# TABLEAU DES TAPES EXPIREES
+# =================================================
+
+$expiredTapes = Get-VBRTapeMedium |
+Where-Object { $_.IsExpired -eq $true } |
+Sort-Object ExpirationDate |
+Select-Object Name, Barcode, MediaPoolName, Location, ExpirationDate
+
+$html += "<h2 style='text-align:center;margin-top:40px'>Tapes expirées</h2>
+<table>
+<tr>
+    <th>Nom</th>
+    <th>Barcode</th>
+    <th>Media Pool</th>
+    <th>Location</th>
+    <th>Date d’expiration</th>
+</tr>"
+
+if (-not $expiredTapes -or $expiredTapes.Count -eq 0) {
+    $html += "<tr>
+        <td colspan='5' class='green' style='text-align:center'>
+            Aucune tape expirée détectée
+        </td>
+    </tr>"
+}
+else {
+    foreach ($tape in $expiredTapes) {
+        $html += "<tr>
+            <td>$($tape.Name)</td>
+            <td>$($tape.Barcode)</td>
+            <td>$($tape.MediaPoolName)</td>
+            <td>$($tape.Location)</td>
+            <td class='red'>$($tape.ExpirationDate.ToString('dd/MM/yyyy'))</td>
+        </tr>"
+    }
+}
+
+$html += "</table>"
