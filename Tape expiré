@@ -1,39 +1,27 @@
 # =================================================
-# TABLEAU DES TAPES EXPIREES
+# TAPES EXPIRÉES  <<< BLOC AJOUTÉ
 # =================================================
+$expiredTapes = Get-VBRTapeMedium | Where-Object {
+    $_.ExpirationDate -and $_.ExpirationDate -lt (Get-Date)
+} | Select-Object `
+    @{Name="Tape"; Expression={$_.Name}},
+    @{Name="ExpirationDate"; Expression={$_.ExpirationDate}},
+    @{Name="PoolName"; Expression={
+        (Get-VBRTapeMediaPool | Where-Object { $_.Id -eq $_.MediaPoolId }).Name
+    }}
 
-$expiredTapes = Get-VBRTapeMedium |
-Where-Object { $_.IsExpired -eq $true } |
-Sort-Object ExpirationDate |
-Select-Object Name, Barcode, MediaPoolName, Location, ExpirationDate
 
+
+
+# ===== TABLEAU TAPES EXPIRÉES =====
 $html += "<h2 style='text-align:center;margin-top:40px'>Tapes expirées</h2>
 <table>
-<tr>
-    <th>Nom</th>
-    <th>Barcode</th>
-    <th>Media Pool</th>
-    <th>Location</th>
-    <th>Date d’expiration</th>
-</tr>"
+<tr><th>Tape</th><th>Expiration Date</th><th>Pool Name</th></tr>"
 
-if (-not $expiredTapes -or $expiredTapes.Count -eq 0) {
+foreach ($t in $expiredTapes | Sort-Object ExpirationDate) {
     $html += "<tr>
-        <td colspan='5' class='green' style='text-align:center'>
-            Aucune tape expirée détectée
-        </td>
+        <td>$($t.Tape)</td>
+        <td>$($t.ExpirationDate.ToString('yyyy-MM-dd'))</td>
+        <td>$($t.PoolName)</td>
     </tr>"
 }
-else {
-    foreach ($tape in $expiredTapes) {
-        $html += "<tr>
-            <td>$($tape.Name)</td>
-            <td>$($tape.Barcode)</td>
-            <td>$($tape.MediaPoolName)</td>
-            <td>$($tape.Location)</td>
-            <td class='red'>$($tape.ExpirationDate.ToString('dd/MM/yyyy'))</td>
-        </tr>"
-    }
-}
-
-$html += "</table>"
