@@ -1,13 +1,69 @@
-LastRun = ($_.Group | Sort-Object CreationTime -Descending | Select-Object -First 1).CreationTime
+# =================================================
+# REPLICATION
+# =================================================
+$replicaStats = Get-VBRBackupSession |
+Where-Object { $_.CreationTime -ge $since -and $_.JobType -eq "Replica"} |
+Group-Object JobName |
+ForEach-Object {
+    $lastRun = ($_.Group | Sort-Object CreationTime -Descending | Select-Object -First 1).CreationTime
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
 
-
-[PSCustomObject]@{
-    Type     = "Backup"
-    JobName  = $_.Name
-    Success  = $success
-    Warning  = $warning
-    Failed   = $failed
-    Total    = $total
-    Percent  = if ($total -gt 0) { [math]::Round(($success / $total) * 100,1) } else { 0 }
-    LastRun  = ($_.Group | Sort-Object CreationTime -Descending | Select-Object -First 1).CreationTime
+    [PSCustomObject]@{
+        Type     = "Replica"
+        JobName  = $_.Name
+        LastRun  = $lastRun
+        Success  = $success
+        Warning  = $warning
+        Failed   = $failed
+        Total    = $total
+        Percent  = if ($total -gt 0) { [math]::Round((($success + $warning) / $total) * 100,1) } else { 0 }
+    }
 }
+
+$rpSuccess = ($replicaStats | Measure-Object Success -Sum).Sum
+$rpFailed  = ($replicaStats | Measure-Object Failed  -Sum).Sum
+$rpWarning = ($replicaStats | Measure-Object Warning -Sum).Sum
+$rpTotal   = $rpSuccess + $rpFailed + $rpWarning
+$rpPercent = if ($rpTotal -gt 0) { [math]::Round((($rpSuccess + $rpWarning) / $rpTotal) * 100,1) } else { 0 }
+
+# =================================================
+# TAPE BACKUP
+# =================================================
+$tapeSessions = Get-VBRTapeJob | ForEach-Object { Get-VBRTapeBackupSession -Job $_ } |
+Where-Object { $_.CreationTime -ge $since }
+
+$tapeStats = $tapeSessions |
+Group-Object Name |
+ForEach-Object {
+    $lastRun = ($_.Group | Sort-Object CreationTime -Descending | Select-Object -First 1).CreationTime
+    $success = ($_.Group | Where-Object Result -eq "Success").Count
+    $failed  = ($_.Group | Where-Object Result -eq "Failed").Count
+    $warning = ($_.Group | Where-Object Result -eq "Warning").Count
+    $total   = $_.Count
+
+    [PSCustomObject]@{
+        Type     = "Tape"
+        JobName  = $_.Name
+        LastRun  = $lastRun
+        Success  = $success
+        Warning  = $warning
+        Failed   = $failed
+        Total    = $total
+        Percent  = if ($total -gt 0) { [math]::Round((($success + $warning) / $total) * 100,1) } else { 0 }
+    }
+}
+
+# =================================================
+# HTML – TABLEAUX DÉTAILLÉS JOBS
+# =================================================
+$html += "<h2 style='text-align:center;margin-top:40px'>Tableau détaillé Jobs Backup</h2>
+<table>
+<tr><th>Type</th><th>Job</th><th>Last Run</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th></tr>"
+foreach ($j in $backupStats) {
+    $cls = if ($j.Warning -ge 1) { "orange" } elseif ($j.Percent -ge 80) { "green" } else { "red" }
+    $html += "<tr><td>$($j.Type)</td><td>$($j.JobName)</td><td>$($j.LastRun)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td></tr>"
+}
+$html += "</table>"
