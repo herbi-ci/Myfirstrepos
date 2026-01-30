@@ -1,7 +1,7 @@
 # =================================================
 # PARAMÈTRES
 # =================================================
-$since  = (Get-Date).AddDays(-30)
+$since  = (Get-Date).AddDays(-7)
 $output = "C:\Temp\Veeam_Health_Dashboard.html"
 
 # =================================================
@@ -241,6 +241,7 @@ th,td { padding:10px; border-bottom:1px solid #ddd }
 th { background:#2c3e50; color:white }
 .green { color:#00B336; font-weight:bold }
 .red { color:#E31E24; font-weight:bold }
+.orange { color:#FF7F00; font-weight:bold }
 </style>
 </head>
 <body>
@@ -348,6 +349,7 @@ $html += "</div>"
 # =================================================
 # TABLEAUX
 # =================================================
+<#
 function Append-Table {
 param($stats,$title)
 $html += "<h2 style='text-align:center;margin-top:40px'>$title</h2><table><tr><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th></tr>"
@@ -361,6 +363,7 @@ $html += "</table>"
 Append-Table $backupStats "Détails Backup (30 jours)"
 Append-Table $replicaStats "Détails Replication (30 jours)"
 Append-Table $tapeStats "Détails Tape Backup (30 jours)"
+#>
 
 # Tableau détaillé Repos
 $html += "<h2 style='text-align:center;margin-top:40px'>Détails Repositories</h2>
@@ -389,7 +392,7 @@ $html += "<h2 style='text-align:center;margin-top:40px'>Tableau détaillé Jobs 
 <table>
 <tr><th>Type</th><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th></tr>"
 foreach ($j in $backupStats) {
-    $cls = if ($j.Percent -ge 80) { "green" } else { "red" }
+    $cls = if ($j.Warning -ge 1) { "orange" } elseif ($j.Percent -ge 80) { "green" } else { "red" }
     $html += "<tr><td>$($j.Type)</td><td>$($j.JobName)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td></tr>"
 }
 $html += "</table>"
