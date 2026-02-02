@@ -1,0 +1,74 @@
+# =================================================
+# ENVOI DU RAPPORT PAR MAIL
+# =================================================
+
+$smtpServer = "smtp.mondomaine.local"
+$smtpPort   = 25
+$mailFrom   = "veeam-report@mondomaine.local"
+$mailTo     = "admin@mondomaine.local"
+$mailSubject = "Veeam Infrastructure Health Report"
+
+$mailBody = @"
+<html>
+<body style="font-family:Segoe UI, Arial; background-color:#f4f6f8; padding:20px;">
+    <table style="max-width:700px; margin:auto; background:#ffffff;
+                  border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.1);
+                  border-collapse:collapse;">
+        <tr>
+            <td style="background-color:#E1061E; color:#ffffff;
+                       padding:15px; font-size:20px; font-weight:bold;">
+                Veeam Infrastructure Health Report
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px; font-size:14px; color:#333333;">
+                <p>Bonjour,</p>
+
+                <p>
+                    Veuillez trouver en pièce jointe le
+                    <strong>rapport de santé de l’infrastructure Veeam</strong>.
+                </p>
+
+                <p>
+                    Ce rapport présente l’état des jobs de sauvegarde,
+                    de réplication et de bandes, ainsi que les indicateurs
+                    clés de supervision pour la période suivante :
+                </p>
+
+                <ul>
+                    <li><strong>Période analysée :</strong> $rptMode</li>
+                    <li><strong>Date de génération :</strong> $(Get-Date -Format 'yyyy-MM-dd HH:mm')</li>
+                </ul>
+
+                <p>
+                    Nous vous recommandons de consulter ce rapport afin
+                    d’identifier rapidement toute anomalie ou action
+                    préventive à mener.
+                </p>
+
+                <p>
+                    Cordialement,<br/>
+                    <strong>Veeam Monitoring</strong>
+                </p>
+            </td>
+        </tr>
+        <tr>
+            <td style="background-color:#000000; color:#ffffff;
+                       padding:10px; font-size:11px; text-align:center;">
+                Message généré automatiquement – merci de ne pas répondre
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"@
+
+Send-MailMessage `
+    -From $mailFrom `
+    -To $mailTo `
+    -Subject $mailSubject `
+    -Body $mailBody `
+    -BodyAsHtml `
+    -SmtpServer $smtpServer `
+    -Port $smtpPort `
+    -Attachments $output
