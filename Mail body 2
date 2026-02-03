@@ -1,6 +1,10 @@
 $mailBody = @"
 <html>
-<body style="font-family:Segoe UI; font-size:13px; color:#000">
+<head>
+<meta charset="UTF-8">
+</head>
+
+<body style="font-family:'Segoe UI', Arial, sans-serif; font-size:13px; color:#000; margin:0; padding:0">
 
 <p>Bonjour,</p>
 
@@ -10,10 +14,21 @@ de sauvegarde pour la période des <b>7 derniers jours</b>.
 </p>
 
 <table cellpadding="6" cellspacing="0" border="1"
-       style="border-collapse:collapse; width:100%; max-width:700px;
-              font-size:13px; border-color:#ddd">
+       style="
+       border-collapse:collapse;
+       width:100%;
+       max-width:100%;
+       font-size:13px;
+       border-color:#dcdcdc;
+       table-layout:auto;
+       ">
 
-<tr style="background-color:#2c3e50; color:#ffffff; text-align:center">
+<tr style="
+    background-color:#00B336; /* Vert officiel Veeam */
+    color:#ffffff;
+    text-align:center;
+    font-weight:bold;
+">
   <th>Type</th>
   <th>Total</th>
   <th>Success</th>
@@ -28,7 +43,7 @@ de sauvegarde pour la période des <b>7 derniers jours</b>.
   <td style="color:#00B336"><b>$bkSuccess</b></td>
   <td style="color:#FF7F00"><b>$bkWarning</b></td>
   <td style="color:#E31E24"><b>$bkFailed</b></td>
-  <td><b>$bkPercent%</b></td>
+  <td><b>$bkPercent %</b></td>
 </tr>
 
 <tr style="text-align:center">
@@ -37,7 +52,7 @@ de sauvegarde pour la période des <b>7 derniers jours</b>.
   <td style="color:#00B336"><b>$rpSuccess</b></td>
   <td style="color:#FF7F00"><b>$rpWarning</b></td>
   <td style="color:#E31E24"><b>$rpFailed</b></td>
-  <td><b>$rpPercent%</b></td>
+  <td><b>$rpPercent %</b></td>
 </tr>
 
 <tr style="text-align:center">
@@ -46,7 +61,7 @@ de sauvegarde pour la période des <b>7 derniers jours</b>.
   <td style="color:#00B336"><b>$tpSuccess</b></td>
   <td style="color:#FF7F00"><b>$tpWarning</b></td>
   <td style="color:#E31E24"><b>$tpFailed</b></td>
-  <td><b>$tpPercent%</b></td>
+  <td><b>$tpPercent %</b></td>
 </tr>
 
 </table>
