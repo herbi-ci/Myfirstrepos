@@ -1,0 +1,65 @@
+$mailBody = @"
+<html>
+<body style="font-family:Segoe UI; font-size:13px; color:#000">
+
+<p>Bonjour,</p>
+
+<p>
+Veuillez trouver ci-dessous le résumé de l’état de santé de l’infrastructure
+de sauvegarde pour la période des <b>7 derniers jours</b>.
+</p>
+
+<table cellpadding="6" cellspacing="0" border="1"
+       style="border-collapse:collapse; width:100%; max-width:700px;
+              font-size:13px; border-color:#ddd">
+
+<tr style="background-color:#2c3e50; color:#ffffff; text-align:center">
+  <th>Type</th>
+  <th>Total</th>
+  <th>Success</th>
+  <th>Warning</th>
+  <th>Failed</th>
+  <th>Success %</th>
+</tr>
+
+<tr style="text-align:center">
+  <td><b>Backup</b></td>
+  <td>$bkTotal</td>
+  <td style="color:#00B336"><b>$bkSuccess</b></td>
+  <td style="color:#FF7F00"><b>$bkWarning</b></td>
+  <td style="color:#E31E24"><b>$bkFailed</b></td>
+  <td><b>$bkPercent%</b></td>
+</tr>
+
+<tr style="text-align:center">
+  <td><b>Replication</b></td>
+  <td>$rpTotal</td>
+  <td style="color:#00B336"><b>$rpSuccess</b></td>
+  <td style="color:#FF7F00"><b>$rpWarning</b></td>
+  <td style="color:#E31E24"><b>$rpFailed</b></td>
+  <td><b>$rpPercent%</b></td>
+</tr>
+
+<tr style="text-align:center">
+  <td><b>Tape Backup</b></td>
+  <td>$tpTotal</td>
+  <td style="color:#00B336"><b>$tpSuccess</b></td>
+  <td style="color:#FF7F00"><b>$tpWarning</b></td>
+  <td style="color:#E31E24"><b>$tpFailed</b></td>
+  <td><b>$tpPercent%</b></td>
+</tr>
+
+</table>
+
+<p style="margin-top:15px">
+Le rapport détaillé est disponible en pièce jointe.
+</p>
+
+<p>
+Cordialement,<br>
+<b>Veeam Backup Reporting</b>
+</p>
+
+</body>
+</html>
+"@
