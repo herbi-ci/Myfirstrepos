@@ -1,0 +1,569 @@
+# ==============================================================================
+# SCRIPT DE SUPERVISION VEEAM BACKUP & REPLICATION
+# ==============================================================================
+# CE SCRIPT PERMET DE :
+# 1. Configurer les paramètres (Emails, Chemins...)
+# 2. Récupérer les informations de Veeam (Jobs, Repositories, Tapes...)
+# 3. Générer un rapport HTML complet
+# 4. Envoyer ce rapport par email
+
+# ==============================================================================
+# 1. CONFIGURATION ET VARIABLES
+# ==============================================================================
+# Définissez ici les informations de votre environnement et vos préférences d'envoi.
+
+# Informations de l'entité
+$Filiale       = "MaFiliale"       # Nom de votre site/filiale
+$Environnement = "Production"      # Nom de l'environnement
+
+# Configuration des Emails
+$SmtpServer    = "smtp.mon-entreprise.com"  # Adresse du serveur de messagerie
+$SmtpPort      = 25                         # Port SMTP (souvent 25)
+$MailFrom      = "veeam@mon-entreprise.com" # Qui envoie le mail ?
+$MailTo        = "admin@mon-entreprise.com" # Qui reçoit le mail ?
+$MailSubject   = "$Filiale $Environnement - Rapport Veeam KPI"
+
+# Configuration du Période et Fichier
+$JoursAnalyse  = 7                          # Nombre de jours d'historique à analyser
+$DateDebut     = (Get-Date).AddDays(-$JoursAnalyse)
+$OutputHtml    = "C:\Temp\Veeam_KPI_Dashboard.html" # Où sauvegarder le fichier HTML ?
+
+# Titres pour le rapport
+$TitreRapport  = "$Filiale $Environnement Veeam Infrastructure KPI"
+$PeriodeTexte  = "Période analysée : $($DateDebut.ToString('yyyy-MM-dd')) → $(Get-Date -Format 'yyyy-MM-dd')"
+$DateGeneration= Get-Date -Format "yyyy-MM-dd HH:mm"
+
+# ==============================================================================
+# 2. FONCTIONS UTILITAIRES (OUTILS)
+# ==============================================================================
+# Ces fonctions sont utilisées plus loin pour mettre en forme les données.
+
+# Fonction pour calculer les détails des Repositories (Espace libre, occupé, etc.)
+Function Get-VBRRepoInfo {
+    [CmdletBinding()]
+    param (
+        [Parameter(Position=0, ValueFromPipeline=$true)]
+        [PSObject[]]$Repository
+    )
+    Begin {
+        $outputAry = @()
+
+        # Petite fonction interne pour créer l'objet final proprement
+        Function Build-Object {
+            param($name, $repohost, $path, $free, $total, $rtype, $rBackupsize)
+            
+            # Conversion en Téraoctets (TB) pour que ce soit lisible
+            $freeTB   = [Math]::Round([Decimal]$free / 1TB, 2)
+            $totalTB  = [Math]::Round([Decimal]$total / 1TB, 2)
+            $backupTB = [Math]::Round([Decimal]$rBackupsize / 1TB, 2)
+
+            $repoObj = [PSCustomObject]@{
+                Target          = $name
+                RepoHost        = $repohost
+                StorePath       = $path
+                StorageFreeTB   = $freeTB
+                StorageTotalTB  = $totalTB
+                FreePercentage  = if ($total -gt 0) { [Math]::Round(($free / $total) * 100, 2) } else { 0 }
+                StorageBackupTB = $backupTB
+                rType           = $rtype
+            }
+            return $repoObj
+        }
+    }
+    Process {
+        foreach ($r in $Repository) {
+            # Force la mise à jour des infos de taille dans la base de données Veeam
+            [Veeam.Backup.Core.CBackupRepositoryEx]::SyncSpaceInfoToDb($r, $true)
+
+            # Identification du type de stockage (Windows, Linux, NAS...)
+            $rType = switch ($r.Type) {
+                "WinLocal"      { "Windows Local" }
+                "LinuxLocal"    { "Linux Local" }
+                "LinuxHardened" { "Hardened" }
+                "CifsShare"     { "CIFS Share" }
+                "DataDomain"    { "Data Domain" }
+                "ExaGrid"       { "ExaGrid" }
+                "HPStoreOnce"   { "HP StoreOnce" }
+                "Nfs"           { "NFS Direct" }
+                default         { "Unknown" }
+            }
+
+            # Calcul de la taille totale des backups stockés ici
+            $rBackupsize = 0
+            $backups = Get-VBRBackup | Where-Object { $_.RepositoryId -eq $r.Id }
+            foreach ($b in $backups) {
+                foreach ($storage in $b.GetAllStorages()) {
+                    $rBackupsize += $storage.Stats.BackupSize
+                }
+            }
+
+            # Création de la ligne de résultat pour ce repository
+            $outputObj = Build-Object `
+                $r.Name `
+                $($r.GetHost()).Name.ToLower() `
+                $r.Path `
+                $r.GetContainer().CachedFreeSpace.InBytes `
+                $r.GetContainer().CachedTotalSpace.InBytes `
+                $rType `
+                $rBackupsize
+
+            $outputAry += $outputObj
+        }
+    }
+    End {
+        $outputAry
+    }
+}
+
+# Fonction pour créer un graphique circulaire (Donut) en SVG
+function Get-Donut {
+    param($percent, $label)
+    # Si succès > 80% vert, sinon rouge
+    $color = if ($percent -ge 80) { "#00B336" } else { "#E31E24" }
+    $offset = 440 - (440 * $percent / 100)
+
+    # Code SVG du graphique
+    return @"
+    <svg width="160" height="160">
+    <circle cx="80" cy="80" r="70" stroke="#eee" stroke-width="15" fill="none"/>
+    <circle cx="80" cy="80" r="70" stroke="$color" stroke-width="15"
+    fill="none" stroke-dasharray="440" stroke-dashoffset="$offset"
+    transform="rotate(-90 80 80)"/>
+    <text x="50%" y="50%" text-anchor="middle" dy=".3em"
+    font-size="22" font-weight="bold">$label%</text>
+    </svg>
+"@
+}
+
+# Fonction pour créer une barre de progression en SVG
+function Get-Bar {
+    param([double]$usedPercent)
+    # Si utilisé > 70% rouge (attention !), sinon vert
+    $color = if ($usedPercent -ge 70) { "#E31E24" } else { "#00B336" }
+    $width  = [math]::Round(($usedPercent / 100) * 160)
+    
+    # Code SVG de la barre
+    return @"
+    <svg width="160" height="20">
+    <rect width="160" height="20" fill='#eee' rx='5' ry='5'/>
+    <rect width="$width" height="20" fill="$color" rx='5' ry='5'/>
+    <text x='50%' y='14' text-anchor='middle' alignment-baseline='middle'
+        font-size='12' font-weight='bold' fill='#000'>$usedPercent`%</text>
+    </svg>
+"@
+}
+
+# ==============================================================================
+# 3. RÉCUPÉRATION ET CALCUL DES STATISTIQUES (TRAITEMENT)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# ÉTAPE A : RÉCUPÉRATION DES SESSIONS (Backups & Réplicas)
+# ------------------------------------------------------------------------------
+# Pour aller plus vite, on récupère TOUTES les sessions d'un coup
+# au lieu de demander 2 fois à Veeam.
+$ToutesSessions = Get-VBRBackupSession | Where-Object { $_.CreationTime -ge $DateDebut }
+
+# --- FILTER 1 : SESSIONS DE BACKUP ---
+$backupStats = $ToutesSessions | 
+    Where-Object { $_.JobType -eq "Backup" } | 
+    Group-Object JobName | 
+    ForEach-Object {
+        $Groupe = $_.Group # Toutes les tentatives de ce job
+        
+        # Calculs simples
+        $NbSucces  = ($Groupe | Where-Object Result -eq "Success").Count
+        $NbWarning = ($Groupe | Where-Object Result -eq "Warning").Count
+        $NbEchec   = ($Groupe | Where-Object Result -eq "Failed").Count
+        $NbTotal   = $Groupe.Count
+        
+        # Pourcentage de réussite (Succès + Warning comptent comme OK)
+        $Pourcent  = 0
+        if ($NbTotal -gt 0) {
+            $Pourcent = [math]::Round( (($NbSucces + $NbWarning) / $NbTotal) * 100, 1)
+        }
+        
+        # On crée l'objet final pour ce job
+        [PSCustomObject]@{
+            Type     = "Backup"
+            JobName  = $_.Name
+            Success  = $NbSucces
+            Warning  = $NbWarning
+            Failed   = $NbEchec
+            Total    = $NbTotal
+            Percent  = $Pourcent
+            LastRun  = ($Groupe | Sort-Object CreationTime -Descending | Select-Object -First 1).CreationTime
+        }
+    }
+
+# Calcul global pour le graphique "Backup"
+$bkPercent = 0
+if ($backupStats) {
+    # Moyenne de tous les pourcentages des jobs
+    $bkPercent = ($backupStats | Measure-Object Percent -Average).Average
+    $bkPercent = [math]::Round($bkPercent, 1)
+}
+
+
+# --- FILTER 2 : SESSIONS DE RÉPLICATION ---
+$replicaStats = $ToutesSessions | 
+    Where-Object { $_.JobType -eq "Replica" } | 
+    Group-Object JobName | 
+    ForEach-Object {
+        $Groupe = $_.Group
+        
+        $NbSucces  = ($Groupe | Where-Object Result -eq "Success").Count
+        $NbWarning = ($Groupe | Where-Object Result -eq "Warning").Count
+        $NbEchec   = ($Groupe | Where-Object Result -eq "Failed").Count
+        $NbTotal   = $Groupe.Count
+        
+        $Pourcent  = 0
+        if ($NbTotal -gt 0) {
+            $Pourcent = [math]::Round( (($NbSucces + $NbWarning) / $NbTotal) * 100, 1)
+        }
+        
+        [PSCustomObject]@{
+            Type     = "Replica"
+            JobName  = $_.Name
+            Success  = $NbSucces
+            Warning  = $NbWarning
+            Failed   = $NbEchec
+            Total    = $NbTotal
+            Percent  = $Pourcent
+            LastRun  = ($Groupe | Sort-Object CreationTime -Descending | Select-Object -First 1).CreationTime
+        }
+    }
+
+# Calcul global pour le graphique "Réplication"
+$rpPercent = 0
+if ($replicaStats) {
+    $rpPercent = ($replicaStats | Measure-Object Percent -Average).Average
+    $rpPercent = [math]::Round($rpPercent, 1)
+}
+
+
+# ------------------------------------------------------------------------------
+# ÉTAPE B : RÉCUPÉRATION DES SESSIONS SUR BANDE (TAPE)
+# ------------------------------------------------------------------------------
+# Les jobs sur bande sont gérés différemment dans Veeam (commandes différentes)
+
+$tapeSessions = Get-VBRTapeJob | ForEach-Object { Get-VBRTapeBackupSession -Job $_ } |
+    Where-Object { $_.CreationTime -ge $DateDebut }
+
+$tapeStats = $tapeSessions |
+    Group-Object Name | # Attention : Ici la propriété s'appelle souvent Name, pas JobName
+    ForEach-Object {
+        $Groupe = $_.Group
+        
+        $NbSucces  = ($Groupe | Where-Object Result -eq "Success").Count
+        $NbWarning = ($Groupe | Where-Object Result -eq "Warning").Count
+        $NbEchec   = ($Groupe | Where-Object Result -eq "Failed").Count
+        $NbTotal   = $Groupe.Count
+        
+        $Pourcent  = 0
+        if ($NbTotal -gt 0) {
+            $Pourcent = [math]::Round( (($NbSucces + $NbWarning) / $NbTotal) * 100, 1)
+        }
+        
+        [PSCustomObject]@{
+            Type     = "Tape"
+            JobName  = $_.Name
+            Success  = $NbSucces
+            Warning  = $NbWarning
+            Failed   = $NbEchec
+            Total    = $NbTotal
+            Percent  = $Pourcent
+            LastRun  = ($Groupe | Sort-Object CreationTime -Descending | Select-Object -First 1).CreationTime
+        }
+    }
+
+# Calcul global pour le graphique "Tape"
+$tpPercent = 0
+if ($tapeStats) {
+    $tpPercent = ($tapeStats | Measure-Object Percent -Average).Average
+    $tpPercent = [math]::Round($tpPercent, 1)
+}
+
+
+# ------------------------------------------------------------------------------
+# ÉTAPE C : STATISTIQUES DES REPOSITORIES (STOCKAGE)
+# ------------------------------------------------------------------------------
+# On utilise la fonction 'Get-VBRRepoInfo' définie plus haut (Section 2)
+$repoStats = Get-VBRBackupRepository | Get-VBRRepoInfo
+
+foreach ($r in $repoStats) {
+    # On ajoute juste le % utilisé pour l'affichage
+    $r | Add-Member -MemberType NoteProperty -Name UsedPercent -Value ([math]::Round(100 - $r.FreePercentage, 2))
+}
+
+
+# ------------------------------------------------------------------------------
+# ÉTAPE D : STATISTIQUES DES TAPE POOLS
+# ------------------------------------------------------------------------------
+$mediaPools = Get-VBRTapeMediaPool
+# On prépare un tableau vide pour stocker les résultats
+$poolResults = @()
+
+foreach ($pool in $mediaPools) {
+    # On ne garde que les bandes "physiquement présentes" (Slot ou Lecteur)
+    $onlineTapes = Get-VBRTapeMedium | Where-Object { 
+        $_.MediaPoolId -eq $pool.Id -and ($_.Location -match 'Slot' -or $_.Location -match 'Drive' ) 
+    }
+
+    # Si aucune bande, on met des zéros partout
+    if (-not $onlineTapes -or $onlineTapes.Count -eq 0) {
+        $poolResults += [PSCustomObject]@{
+            PoolName        = $pool.Name
+            TotalCapacityTB = 0
+            UsedCapacityTB  = 0
+            FreeCapacityTB  = 0
+            OnlineCount     = 0
+            UsedPercentage  = 0
+        }
+        continue # On passe au pool suivant
+    }
+
+    # Sinon, on calcule la capacité totale en TB
+    $totalCapacity = ($onlineTapes | Measure-Object -Property Capacity -Sum).Sum / 1TB
+    $freeCapacity  = ($onlineTapes | Measure-Object -Property Free -Sum).Sum / 1TB
+    $usedCapacity  = $totalCapacity - $freeCapacity
+    
+    # Calcul des pourcentages
+    $UsedPct = 0
+    if ($totalCapacity -gt 0) {
+        $UsedPct = [Math]::Round(($usedCapacity / $totalCapacity) * 100, 2)
+    }
+
+    $poolResults += [PSCustomObject]@{
+        PoolName        = $pool.Name
+        TotalCapacityTB = [math]::Round($totalCapacity, 2)
+        UsedCapacityTB  = [math]::Round($usedCapacity, 2)
+        FreeCapacityTB  = [math]::Round($freeCapacity, 2)
+        OnlineCount     = $onlineTapes.Count
+        UsedPercentage  = $UsedPct
+    }
+}
+# On retire les pools "système" (Imported, Free, etc.) qui ne nous intéressent pas
+$poolResults = $poolResults | Where-Object { 
+    $_.PoolName -notmatch 'Imported|Free|Retired|Unrecognized' 
+}
+
+
+# ------------------------------------------------------------------------------
+# ÉTAPE E : LISTE DES BANDES EXPIRÉES
+# ------------------------------------------------------------------------------
+$expiredTapes = Get-VBRTapeMedium | Where-Object { 
+    ($_.Location -match 'Slot' -or $_.Location -match 'Drive' ) -and 
+    $_.ExpirationDate -and 
+    $_.ExpirationDate -lt (Get-Date)
+}
+# On simplifie l'objet pour l'affichage HTML futur
+$expiredTapesTable = $expiredTapes | ForEach-Object {
+    [PSCustomObject]@{
+        TapeNumber          = $_.Name
+        TapeExpirationDate  = $_.ExpirationDate
+    }
+}
+
+
+# ==============================================================================
+# 4. GÉNÉRATION DU RAPPORT HTML
+# ==============================================================================
+
+# -- En-tête HTML (Titre + Date) --
+$bodyTop = @"
+<body>
+<table style="width:100%;border-collapse:collapse;margin-bottom:30px;">
+    <tr>
+        <td style="width:70%; background-color:#E71C21; color:white; font-size:22px; font-weight:bold; padding:15px; text-align:left;">
+            $TitreRapport
+        </td>
+        <td style="width:30%; background-color:#E71C21; color:white; font-size:12px; padding:15px; text-align:right; vertical-align:top;">
+            KPI généré le<br/>
+            <strong>$DateGeneration</strong>
+        </td>
+    </tr>
+    <tr>
+        <td colspan="2" style="background-color:#000000; color:white; font-size:12px; padding:6px 15px; text-align:left;">
+            $PeriodeTexte
+        </td>
+    </tr>
+</table>
+"@
+
+# -- Début du HTML --
+$html = @"
+<html>
+<head>
+<title>$Filiale $Environnement VEEAM KPI</title>
+<style>
+body { font-family:Segoe UI; background:#f4f6f8 }
+.container { display:flex; justify-content:center; gap:40px; flex-wrap:wrap }
+.card { background:#fff; padding:20px; border-radius:10px; box-shadow:0 0 10px rgba(0,0,0,0.1); text-align:center; margin-bottom:20px }
+table { width:90%; margin:auto; border-collapse:collapse; margin-top:20px }
+th,td { padding:10px; border-bottom:1px solid #ddd }
+th { background:#2c3e50; color:white }
+.green { color:#00B336; font-weight:bold }
+.red { color:#E31E24; font-weight:bold }
+.orange { color:#FF7F00; font-weight:bold }
+</style>
+</head>
+<body>
+
+$bodyTop
+
+<div class="container">
+ <div class="card">
+  <h3>Backup Success</h3>
+  $(Get-Donut $bkPercent $bkPercent)
+ </div>
+
+ <div class="card">
+  <h3>Replication Success</h3>
+  $(Get-Donut $rpPercent $rpPercent)
+ </div>
+
+ <div class="card">
+  <h3>Tape Backup Success</h3>
+  $(Get-Donut $tpPercent $tpPercent)
+ </div>
+</div>
+"@
+
+# -- Section Repositories (Barres) --
+$html += "<h2 style='text-align:center;margin-top:40px'>Utilisation des Repositories</h2><div class='container'>"
+foreach ($r in $repoStats) {
+    $html += @"
+ <div class='card'>
+  <h4>$($r.Name)</h4>
+  $(Get-Bar $($r.UsedPercent))
+  <p>$($r.Target) </p>
+ </div>
+"@
+}
+$html += "</div>"
+
+# -- Section Tape Pools (Barres) --
+$html += "<h2 style='text-align:center;margin-top:40px'>Utilisation des Tapes Media Pool</h2><div class='container'>"
+foreach ($r in $poolResults) {
+    $html += @"
+ <div class='card'>
+  <h4>$($r.Name)</h4>
+  $(Get-Bar $($r.UsedPercentage))
+  <p>$($r.PoolName) </p>
+ </div>
+"@
+}
+$html += "</div>"
+
+# -- Tableau Détail Repositories --
+$html += "<h2 style='text-align:center;margin-top:40px'>Détails Repositories</h2>
+<table>
+<tr><th>Repository</th><th>Host</th><th>Path</th><th>Total TB</th><th>Free TB</th><th>Used %</th><th>BackupSize TB</th><th>Type</th></tr>"
+foreach ($r in $repoStats) {
+    $html += "<tr><td>$($r.Target)</td><td>$($r.RepoHost)</td><td>$($r.StorePath)</td><td>$($r.StorageTotalTB)</td><td>$($r.StorageFreeTB)</td><td>$($r.UsedPercent)%</td><td>$($r.StorageBackupTB)</td><td>$($r.rType)</td></tr>"
+}
+$html += "</table>"
+
+# -- Tableau Détail Tape Media Pools --
+$html += "<h2 style='text-align:center;margin-top:40px'>Détails Tape Media Pool</h2>
+<table>
+<tr><th>Pool Name</th><th>Total TB</th><th>Free TB</th><th>Used TB</th><th>Used %</th></tr>"
+foreach ($r in $poolResults) {
+    $cls = if ($r.UsedPercentage -ge 70) { "red" } else { "green" }
+    $html += "<tr><td>$($r.PoolName)</td><td>$($r.TotalCapacityTB)</td><td>$($r.FreeCapacityTB)</td><td>$($r.UsedCapacityTB)</td><td class='$cls'>$($r.UsedPercentage)%</td></tr>"
+}
+$html += "</table>"
+
+# -- Tableau Détail Jobs Backup --
+$html += "<h2 style='text-align:center;margin-top:40px'>Tableau détaillé Jobs Backup</h2>
+<table>
+<tr><th>Type</th><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th><th>Last Run</th></tr>"
+foreach ($j in $backupStats) {
+    $cls = if ($j.Warning -ge 1) { "orange" } elseif ($j.Percent -ge 80) { "green" } else { "red" }
+    $html += "<tr><td>$($j.Type)</td><td>$($j.JobName)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td><td>$($j.LastRun)</td></tr>"
+}
+$html += "</table>"
+
+# -- Tableau Détail Jobs Réplication --
+$html += "<h2 style='text-align:center;margin-top:40px'>Tableau détaillé Jobs Replication</h2>
+<table>
+<tr><th>Type</th><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th><th>Last Run</th></tr>"
+foreach ($j in $replicaStats) {
+    $cls = if ($j.Percent -ge 80) { "green" } else { "red" }
+    $html += "<tr><td>$($j.Type)</td><td>$($j.JobName)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td><td>$($j.LastRun)</td></tr>"
+}
+$html += "</table>"
+
+# -- Tableau Détail Jobs Tape --
+$html += "<h2 style='text-align:center;margin-top:40px'>Tableau détaillé Jobs Tape Backup</h2>
+<table>
+<tr><th>Type</th><th>Job</th><th>Success</th><th>Warning</th><th>Failed</th><th>%</th><th>Last Run</th></tr>"
+foreach ($j in $tapeStats) {
+    $cls = if ($j.Percent -ge 80) { "green" } else { "red" }
+    $html += "<tr><td>$($j.Type)</td><td>$($j.JobName)</td><td>$($j.Success)</td><td>$($j.Warning)</td><td>$($j.Failed)</td><td class='$cls'>$($j.Percent)%</td><td>$($j.LastRun)</td></tr>"
+}
+$html += "</table>"
+
+# -- Tableau Bandes Expirées --
+$html += "<h2 style='text-align:center;margin-top:40px'>Liste des tapes expirées</h2>
+<table>
+<tr><th>Tape Number</th><th>Expiration Date</th></tr>"
+foreach ($j in $expiredTapesTable) {
+    $html += "<tr><td>$($j.TapeNumber)</td><td>$($j.TapeExpirationDate)</td></tr>"
+}
+$html += "</table>"
+
+# -- Fin du HTML et Sauvegarde --
+$html += "</body></html>"
+$html | Out-File $OutputHtml -Encoding UTF8
+
+
+# ==============================================================================
+# 5. ENVOI DE L'EMAIL
+# ==============================================================================
+
+# Corps du mail pour le destinataire
+$mailBody = @"
+<html>
+<body style="font-family:Segoe UI, Arial; background-color:#f4f6f8; padding:20px;">
+    <table style="max-width:700px; margin:auto; background:#ffffff; border-radius:8px; box-shadow:0 0 10px rgba(0,0,0,0.1); border-collapse:collapse;">
+        <tr>
+            <td style="background-color:#E1061E; color:#ffffff; padding:15px; font-size:20px; font-weight:bold;">
+                Veeam Infrastructure Health Report
+            </td>
+        </tr>
+        <tr>
+            <td style="padding:20px; font-size:14px; color:#333333;">
+                <p>Bonjour,</p>
+                <p>Veuillez trouver en pièce jointe le <strong>rapport de santé de l’infrastructure Veeam</strong>.</p>
+                <ul>
+                    <li><strong>Période analysée :</strong> $PeriodeTexte</li>
+                    <li><strong>Date de génération :</strong> $(Get-Date -Format 'yyyy-MM-dd HH:mm')</li>
+                </ul>
+                <p>Cordialement,<br/><strong>Veeam Monitoring</strong></p>
+            </td>
+        </tr>
+        <tr>
+            <td style="background-color:#000000; color:#ffffff; padding:10px; font-size:11px; text-align:center;">
+                Message généré automatiquement – merci de ne pas répondre
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"@
+
+# Envoi du message SMTP
+Send-MailMessage `
+    -From $MailFrom `
+    -To $MailTo `
+    -Subject $MailSubject `
+    -Body $mailBody `
+    -BodyAsHtml `
+    -SmtpServer $SmtpServer `
+    -Port $SmtpPort `
+    -Attachments $OutputHtml
+
+# Confirmation dans la console
+Write-Host "Rapport généré ($OutputHtml) et envoyé à $MailTo" -ForegroundColor Green
