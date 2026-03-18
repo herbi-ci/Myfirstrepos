@@ -1,0 +1,32 @@
+# =================================================
+# BACKUP JOBS / VMs TABLE
+# =================================================
+
+$jobs = Get-VBRJob | Where-Object {$_.JobType -eq "Backup"}
+
+$jobVMTable = foreach ($job in $jobs) {
+
+    # Retention
+    $retention = $job.GetOptions().BackupStorageOptions.RetainCycles
+
+    # Fréquence (Schedule)
+    if ($job.IsScheduleEnabled) {
+        $frequency = $job.ScheduleOptions.OptionsDaily.Kind
+    }
+    else {
+        $frequency = "Manual"
+    }
+
+    # Liste des VMs
+    $vms = $job.GetObjectsInJob() | Select-Object -ExpandProperty Name
+    $vmList = $vms -join ", "
+
+    [PSCustomObject]@{
+        "Nom du Job" = $job.Name
+        "Retention"  = "$retention restore points"
+        "Fréquence"  = $frequency
+        "Liste des VMs inclue dans le Job" = $vmList
+    }
+}
+
+$jobVMHtml = $jobVMTable | ConvertTo-Html -Fragment
